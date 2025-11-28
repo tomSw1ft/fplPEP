@@ -1,4 +1,4 @@
-# FPL PEP (Python Enhanced Planner)
+# FPL PEP (Predictive Engine for Points)
 
 An advanced Fantasy Premier League (FPL) companion application designed to help you maximize your points through data-driven optimization and analysis. Built with a modern Python GUI.
 
