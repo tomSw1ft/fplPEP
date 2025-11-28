@@ -2,15 +2,17 @@
 
 An advanced Fantasy Premier League (FPL) companion application designed to help you maximize your points through data-driven optimization and analysis. Built with a modern Python GUI.
 
-## Features
+## Current Features
 
-- **Dashboard**: Central hub for all tools with a sleek, dark-mode interface.
+- **Dashboard**: Central hub for all tools with a sleek, dark-mode interface .
 - **Team Optimization**: Automatically selects your best starting XI, captain, and vice-captain based on predicted points (XP) and fixture difficulty.
-- **Tactics Board**: Visualizes your team formation on a pitch view, showing next fixtures and predicted points.
+- **Tactics Board**: Visualizes your team formation on a pitch view, showing the fixture and predicted points for the gameweek.
 - **Transfer Hub**: Analyze the transfer market to find the best replacements by role (GK, DEF, MID, FWD) and budget.
-- **Data Hub**: Deep dive into player statistics, including Form, XP, and Value for Money (Points per £m).
-- **Fixture Difficulty (FDR)**: View upcoming fixture difficulty ratings to plan ahead.
+- **Data Hub**: Deep dive into player statistics.
+- **Fixture Difficulty (FDR)**: View, and edit according to your preference, upcoming fixture difficulty ratings to plan ahead.
 - **Smart Login**: Supports automatic login via Team ID override.
+
+## Future Features
 
 ## Installation
 
