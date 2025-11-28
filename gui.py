@@ -812,6 +812,10 @@ class DataFrame(OptimizerBaseFrame):
 
         self.check_initial_state()
 
+        # Tags for Captaincy
+        self.tree.tag_configure("captain", foreground="#FFD700")  # Gold
+        self.tree.tag_configure("vice", foreground="#C0C0C0")  # Silver
+
     def update_view(self, data):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -828,6 +832,9 @@ class DataFrame(OptimizerBaseFrame):
             key=lambda x: (0 if x["status"] == "Start" else 1, x["position"])
         )
 
+        cap_id = data["captain"]["id"] if data["captain"] else -1
+        vice_id = data["vice_captain"]["id"] if data["vice_captain"] else -1
+
         for p in all_players:
             fixtures_str = " | ".join(
                 [
@@ -835,12 +842,23 @@ class DataFrame(OptimizerBaseFrame):
                     for f in p.get("upcoming_fixtures", [])
                 ]
             )
+
+            display_name = p["name"]
+            row_tag = ""
+
+            if p["id"] == cap_id:
+                display_name += " (C)"
+                row_tag = "captain"
+            elif p["id"] == vice_id:
+                display_name += " (V)"
+                row_tag = "vice"
+
             self.tree.insert(
                 "",
                 tk.END,
                 values=(
                     p["status"],
-                    p["name"],
+                    display_name,
                     self.get_pos_name(p["position"]),
                     f"£{p['price']}m",
                     f"{round(p.get('mins_percent_l5', 0), 1)}%",
@@ -851,6 +869,7 @@ class DataFrame(OptimizerBaseFrame):
                     round(p.get("total_xp", 0), 2),
                     fixtures_str,
                 ),
+                tags=(row_tag,),
             )
 
     def get_pos_name(self, pos_id):
