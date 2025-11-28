@@ -1,0 +1,82 @@
+{
+    "Arsenal": {
+        "H": 5,
+        "A": 5
+    },
+    "Aston Villa": {
+        "H": 3,
+        "A": 4
+    },
+    "Bournemouth": {
+        "H": 3,
+        "A": 4
+    },
+    "Brentford": {
+        "H": 3,
+        "A": 4
+    },
+    "Brighton": {
+        "H": 3,
+        "A": 3
+    },
+    "Burnley": {
+        "H": 1,
+        "A": 2
+    },
+    "Chelsea": {
+        "H": 4,
+        "A": 4
+    },
+    "Crystal Palace": {
+        "H": 3,
+        "A": 4
+    },
+    "Everton": {
+        "H": 2,
+        "A": 3
+    },
+    "Fulham": {
+        "H": 2,
+        "A": 3
+    },
+    "Leeds": {
+        "H": 2,
+        "A": 3
+    },
+    "Liverpool": {
+        "H": 4,
+        "A": 5
+    },
+    "Man City": {
+        "H": 5,
+        "A": 5
+    },
+    "Man Utd": {
+        "H": 3,
+        "A": 4
+    },
+    "Newcastle": {
+        "H": 3,
+        "A": 4
+    },
+    "Nott'm Forest": {
+        "H": 2,
+        "A": 3
+    },
+    "Spurs": {
+        "H": 3,
+        "A": 4
+    },
+    "Sunderland": {
+        "H": 2,
+        "A": 3
+    },
+    "West Ham": {
+        "H": 2,
+        "A": 2
+    },
+    "Wolves": {
+        "H": 1,
+        "A": 2
+    }
+}
