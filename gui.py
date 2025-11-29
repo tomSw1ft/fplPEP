@@ -180,6 +180,39 @@ class FPLApp:
         if isinstance(self.current_frame, OptimizerBaseFrame):
             self.current_frame.optimization_error(error_msg)
 
+    def run_global_optimization_with_ids(self, player_ids):
+        self.shared_state["status"] = "loading"
+        thread = threading.Thread(
+            target=self._optimization_thread_custom, args=(player_ids,)
+        )
+        thread.daemon = True
+        thread.start()
+
+    def _optimization_thread_custom(self, player_ids):
+        try:
+            starters, bench, captain, vice_captain, next_event = (
+                self.manager.optimize_specific_squad(player_ids)
+            )
+
+            self.shared_state["current_squad_ids"] = [p["id"] for p in starters + bench]
+            self.shared_state["current_squad_data"] = {
+                p["id"]: p for p in starters + bench
+            }
+
+            display_data = {
+                "starters": starters,
+                "bench": bench,
+                "captain": captain,
+                "vice_captain": vice_captain,
+                "next_event": next_event,
+            }
+            self.shared_state["optimization_data"] = display_data
+            self.root.after(0, self._optimization_complete)
+
+        except Exception as e:
+            print(f"Optimization error: {e}")
+            self.root.after(0, lambda err=str(e): self._optimization_error(err))
+
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
@@ -767,9 +800,255 @@ class FormationFrame(OptimizerBaseFrame):
             )
 
 
+class PlayerSearchDialog(tk.Toplevel):
+    def __init__(
+        self, parent, manager, on_select, initial_criteria=None, exclude_ids=None
+    ):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.manager = manager
+        self.on_select = on_select
+        self.exclude_ids = exclude_ids or []
+        self.title("Player Search")
+        self.geometry("1000x600")
+
+        # Center
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+        # Search Bar
+        search_frame = tk.Frame(self, bg=COLORS["bg"], pady=20)
+        search_frame.pack(fill=tk.X, padx=20)
+
+        self.search_var = tk.StringVar()
+        entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
+        entry.pack(side=tk.LEFT, padx=(0, 10))
+        entry.bind("<Return>", lambda e: self.start_search_thread())
+
+        self.search_btn = ttk.Button(
+            search_frame, text="Search", command=self.start_search_thread
+        )
+        self.search_btn.pack(side=tk.LEFT)
+
+        # Status
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(
+            search_frame, textvariable=self.status_var, style="CardText.TLabel"
+        ).pack(side=tk.RIGHT)
+
+        # Progress
+        self.progress = ttk.Progressbar(
+            self, orient=tk.HORIZONTAL, mode="indeterminate"
+        )
+
+        # Results
+        columns = ("Name", "Team", "Price", "Form", "Predicted_Pts", "GW_Pts")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings")
+
+        self.tree.heading("Name", text="Name")
+        self.tree.heading("Team", text="Team")
+        self.tree.heading("Price", text="Price")
+        self.tree.heading("Form", text="Form")
+        self.tree.heading("Predicted_Pts", text="Predicted Pts")
+        self.tree.heading("GW_Pts", text="GW Points (Next 5)")
+
+        self.tree.column("Name", width=150)
+        self.tree.column("Team", width=100)
+        self.tree.column("Price", width=80)
+        self.tree.column("Form", width=60)
+        self.tree.column("Predicted_Pts", width=100)
+        self.tree.column("GW_Pts", width=250)
+
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+
+        # Buttons
+        btn_frame = tk.Frame(self, bg=COLORS["bg"], pady=20)
+        btn_frame.pack(fill=tk.X, padx=20)
+
+        ttk.Button(
+            btn_frame, text="Select Player", command=self.confirm_selection
+        ).pack(side=tk.RIGHT)
+        ttk.Button(
+            btn_frame, text="Cancel", command=self.destroy, style="Back.TButton"
+        ).pack(side=tk.RIGHT, padx=10)
+
+        if initial_criteria:
+            self.after(100, lambda: self.start_auto_search_thread(initial_criteria))
+
+    def start_auto_search_thread(self, criteria):
+        self.search_btn.config(state=tk.DISABLED)
+        self.progress.pack(fill=tk.X, pady=(0, 10), before=self.tree)
+        self.progress.start()
+        self.status_var.set("Auto-searching...")
+
+        thread = threading.Thread(target=self.run_auto_search, args=(criteria,))
+        thread.daemon = True
+        thread.start()
+
+    def run_auto_search(self, criteria):
+        role_id = criteria.get("role_id")
+        budget = criteria.get("budget", 999.0)
+
+        try:
+            # 1. Fetch Candidates
+            _, df_players = self.manager.fetch_and_filter_data(role_id, budget)
+
+            # Filter excluded
+            if self.exclude_ids and not df_players.empty:
+                df_players = df_players[~df_players["id"].isin(self.exclude_ids)]
+
+            if df_players.empty:
+                self.after(0, self.search_complete, [])
+                return
+
+            # 2. Sort and Take Top 20
+            candidates = df_players.sort_values(by="form", ascending=False).head(20)
+
+            # 3. Calculate XP
+            results = self.calculate_xp_for_list(candidates)
+            self.after(0, self.search_complete, results)
+
+        except Exception as e:
+            print(f"Auto-search error: {e}")
+            self.after(0, self.search_error, str(e))
+
+    def start_search_thread(self):
+        query = self.search_var.get()
+        if len(query) < 3:
+            messagebox.showwarning("Search", "Please enter at least 3 characters.")
+            return
+
+        self.search_btn.config(state=tk.DISABLED)
+        self.progress.pack(fill=tk.X, pady=(0, 10), before=self.tree)
+        self.progress.start()
+        self.status_var.set(f"Searching for '{query}'...")
+
+        thread = threading.Thread(target=self.run_manual_search, args=(query,))
+        thread.daemon = True
+        thread.start()
+
+    def run_manual_search(self, query):
+        try:
+            # 1. Search
+            players_list = self.manager.search_player(query)
+
+            # Filter excluded
+            if self.exclude_ids:
+                players_list = [
+                    p for p in players_list if p["id"] not in self.exclude_ids
+                ]
+
+            if not players_list:
+                self.after(0, self.search_complete, [])
+                return
+
+            # Convert to DataFrame for consistency with calculate_xp_for_list
+            import pandas as pd
+
+            df_players = pd.DataFrame(players_list)
+
+            # 2. Calculate XP
+            results = self.calculate_xp_for_list(df_players)
+            self.after(0, self.search_complete, results)
+
+        except Exception as e:
+            print(f"Manual search error: {e}")
+            self.after(0, self.search_error, str(e))
+
+    def calculate_xp_for_list(self, df_players):
+        results = []
+        teams = self.manager.get_processed_teams()
+        total = len(df_players)
+
+        for i, (_, player) in enumerate(df_players.iterrows()):
+            self.after(
+                0,
+                self.status_var.set,
+                f"Analyzing {i + 1}/{total}: {player['web_name']}",
+            )
+            try:
+                time.sleep(0.05)
+                fixtures = self.manager.get_fixtures(player["id"])
+                xp, gw_points = self.manager.calculate_xp(player, teams, fixtures)
+                gw_str = ", ".join([f"{k}:{v}" for k, v in gw_points.items()])
+
+                # Handle team name
+                team_name = player.get("team_name")
+                if not team_name and "team" in player:
+                    team_name = teams[player["team"]]["name"]
+
+                results.append(
+                    {
+                        "id": player["id"],
+                        "Name": player["web_name"],
+                        "Team": team_name,
+                        "Price": f"£{player['now_cost']}m",
+                        "Form": player["form"],
+                        "Predicted_Pts": round(xp, 2),
+                        "GW_Pts": gw_str,
+                    }
+                )
+            except Exception as e:
+                print(f"Error analyzing {player['web_name']}: {e}")
+                continue
+
+        # Sort by Predicted Points
+        results.sort(key=lambda x: x["Predicted_Pts"], reverse=True)
+        return results
+
+    def search_complete(self, results):
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.search_btn.config(state=tk.NORMAL)
+        self.status_var.set(f"Found {len(results)} players.")
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for row in results:
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row["Name"],
+                    row["Team"],
+                    row["Price"],
+                    row["Form"],
+                    row["Predicted_Pts"],
+                    row["GW_Pts"],
+                ),
+                tags=(str(row["id"]),),
+            )
+
+    def search_error(self, error_msg):
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.search_btn.config(state=tk.NORMAL)
+        self.status_var.set("Error occurred.")
+        messagebox.showerror("Search Error", error_msg)
+
+    def confirm_selection(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+
+        item = self.tree.item(selected[0])
+        if item["tags"]:
+            player_id = int(item["tags"][0])
+            self.on_select(player_id)
+            self.destroy()
+
+
 class DataFrame(OptimizerBaseFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, controller, "Data Hub")
+
+        ttk.Button(
+            self.input_frame, text="Simulate Transfer", command=self.on_transfer_click
+        ).pack(side=tk.RIGHT, padx=20)
 
         # Table
         columns = (
@@ -856,6 +1135,7 @@ class DataFrame(OptimizerBaseFrame):
             self.tree.insert(
                 "",
                 tk.END,
+                iid=str(p["id"]),
                 values=(
                     p["status"],
                     display_name,
@@ -871,6 +1151,41 @@ class DataFrame(OptimizerBaseFrame):
                 ),
                 tags=(row_tag,),
             )
+
+    def on_transfer_click(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Transfer", "Please select a player to remove first.")
+            return
+
+        player_out_id = int(selected[0])
+
+        # Get player details for auto-fill
+        player_data = self.state["current_squad_data"].get(player_out_id)
+        initial_criteria = None
+        if player_data:
+            initial_criteria = {
+                "role_id": player_data["position"],
+                "budget": player_data["price"],
+            }
+
+        PlayerSearchDialog(
+            self,
+            self.manager,
+            lambda pid: self.perform_transfer(player_out_id, pid),
+            initial_criteria=initial_criteria,
+            exclude_ids=self.state.get("current_squad_ids", []),
+        )
+
+    def perform_transfer(self, player_out_id, player_in_id):
+        current_ids = self.state["current_squad_ids"]
+        if player_out_id in current_ids:
+            new_ids = [pid for pid in current_ids if pid != player_out_id]
+            new_ids.append(player_in_id)
+
+            self.controller.run_global_optimization_with_ids(new_ids)
+        else:
+            messagebox.showerror("Error", "Player not found in current squad.")
 
     def get_pos_name(self, pos_id):
         return {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}.get(pos_id, "?")

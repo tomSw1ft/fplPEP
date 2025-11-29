@@ -134,8 +134,9 @@ class FPLManager:
         print("Fetching live FPL data...")
         data = self.get_bootstrap_static()
 
-        # Process Teams
-        teams = {
+    def get_processed_teams(self):
+        data = self.get_bootstrap_static()
+        return {
             t["id"]: {
                 "name": t["name"],
                 "strength_d": t["strength_defence_home"]
@@ -147,6 +148,13 @@ class FPLManager:
             }
             for t in data["teams"]
         }
+
+    def fetch_and_filter_data(self, role_id, max_budget, include_ids=None):
+        print("Fetching live FPL data...")
+        data = self.get_bootstrap_static()
+
+        # Process Teams
+        teams = self.get_processed_teams()
 
         # Process Players
         players = []
@@ -606,16 +614,14 @@ class FPLManager:
                 or query in p["first_name"].lower()
                 or query in p["second_name"].lower()
             ):
-                results.append(
-                    {
-                        "id": p["id"],
-                        "web_name": p["web_name"],
-                        "team": teams[p["team"]],
-                        "price": p["now_cost"] / 10,
-                        "position": p["element_type"],
-                    }
-                )
-                if len(results) >= 10:
+                # Return full player object plus team name for display
+                p_full = p.copy()
+                p_full["team_name"] = teams[p["team"]]
+                # Normalize cost
+                p_full["now_cost"] = p["now_cost"] / 10
+                results.append(p_full)
+
+                if len(results) >= 20:
                     break
 
         return results
