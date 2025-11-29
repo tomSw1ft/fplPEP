@@ -10,29 +10,6 @@ NEXT_N_GW = 5
 BASE_URL = "https://fantasy.premierleague.com/api/"
 CUSTOM_FDR_FILE = "custom_fdr.json"
 
-TEAM_SHORT_NAMES = {
-    "Arsenal": "ARS",
-    "Aston Villa": "AVL",
-    "Bournemouth": "BOU",
-    "Brentford": "BRE",
-    "Brighton": "BHA",
-    "Chelsea": "CHE",
-    "Crystal Palace": "CRY",
-    "Everton": "EVE",
-    "Fulham": "FUL",
-    "Ipswich": "IPS",
-    "Leicester": "LEI",
-    "Liverpool": "LIV",
-    "Man City": "MCI",
-    "Man Utd": "MNU",
-    "Newcastle": "NEW",
-    "Nott'm Forest": "NFO",
-    "Southampton": "SOU",
-    "Spurs": "TOT",
-    "West Ham": "WHU",
-    "Wolves": "WOL",
-}
-
 
 class FPLManager:
     def __init__(self):
@@ -41,6 +18,7 @@ class FPLManager:
         self.last_fetch_time = 0
         self.CACHE_DURATION = 300  # 5 minutes
         self.custom_fdr = self.load_custom_fdr()
+        self.team_short_names = {}
 
     def load_custom_fdr(self):
         if os.path.exists(CUSTOM_FDR_FILE):
@@ -114,6 +92,11 @@ class FPLManager:
         data = self.get_json(BASE_URL + "bootstrap-static/")
         self.bootstrap_static_cache = data
         self.last_fetch_time = current_time
+
+        # Update short names cache
+        if "teams" in data:
+            self.team_short_names = {t["name"]: t["short_name"] for t in data["teams"]}
+
         return data
 
     def get_current_event_id(self):
@@ -240,7 +223,7 @@ class FPLManager:
                         "opponent": teams[a]["name"],
                         "difficulty": diff_h,
                         "is_home": True,
-                        "short_name": TEAM_SHORT_NAMES.get(
+                        "short_name": self.team_short_names.get(
                             teams[a]["name"], teams[a]["name"][:3].upper()
                         ),
                     }
@@ -253,7 +236,7 @@ class FPLManager:
                         "opponent": teams[h]["name"],
                         "difficulty": diff_a,
                         "is_home": False,
-                        "short_name": TEAM_SHORT_NAMES.get(
+                        "short_name": self.team_short_names.get(
                             teams[h]["name"], teams[h]["name"][:3].upper()
                         ),
                     }
@@ -546,7 +529,7 @@ class FPLManager:
                     is_home = f["is_home"]
                     opponent_id = f["team_a"] if is_home else f["team_h"]
                     opponent_name = teams_data[opponent_id]["name"]
-                    opponent_short = TEAM_SHORT_NAMES.get(
+                    opponent_short = self.team_short_names.get(
                         opponent_name, opponent_name[:3].upper()
                     )
                     ha = "(H)" if is_home else "(A)"
@@ -566,7 +549,7 @@ class FPLManager:
                     continue
 
                 opponent_name = teams_data[opponent_id]["name"]
-                opponent_short = TEAM_SHORT_NAMES.get(
+                opponent_short = self.team_short_names.get(
                     opponent_name, opponent_name[:3].upper()
                 )
                 ha = "(H)" if is_home else "(A)"
