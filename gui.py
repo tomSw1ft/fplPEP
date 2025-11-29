@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
+from typing import List, Dict, Any, Optional, Callable
 import tool
 
 # --- CONSTANTS & STYLES ---
@@ -27,7 +28,9 @@ FONTS = {
 
 
 class StartupDialog(tk.Toplevel):
-    def __init__(self, parent, state):
+    """Dialog to prompt the user for their FPL Team ID at startup."""
+
+    def __init__(self, parent: tk.Tk, state: Dict[str, Any]):
         super().__init__(parent, bg=COLORS["bg"])
         self.state = state
         self.title("Welcome")
@@ -68,6 +71,7 @@ class StartupDialog(tk.Toplevel):
         self.valid = False
 
     def validate_and_close(self):
+        """Validates the input Team ID and closes the dialog."""
         tid = self.state["team_id"].get().strip()
         if tid.isdigit():
             self.valid = True
@@ -78,6 +82,7 @@ class StartupDialog(tk.Toplevel):
             )
 
     def on_close(self):
+        """Handles the window close event."""
         if not self.valid:
             self.master.destroy()
 
@@ -801,8 +806,15 @@ class FormationFrame(OptimizerBaseFrame):
 
 
 class PlayerSearchDialog(tk.Toplevel):
+    """Dialog for searching and selecting players for transfer simulation."""
+
     def __init__(
-        self, parent, manager, on_select, initial_criteria=None, exclude_ids=None
+        self,
+        parent: tk.Widget,
+        manager: tool.FPLManager,
+        on_select: Callable[[int], None],
+        initial_criteria: Optional[Dict[str, Any]] = None,
+        exclude_ids: Optional[List[int]] = None,
     ):
         super().__init__(parent, bg=COLORS["bg"])
         self.manager = manager
@@ -1043,7 +1055,9 @@ class PlayerSearchDialog(tk.Toplevel):
 
 
 class DataFrame(OptimizerBaseFrame):
-    def __init__(self, parent, controller):
+    """Displays detailed player statistics and allows for transfer simulation."""
+
+    def __init__(self, parent: tk.Widget, controller: Any):
         super().__init__(parent, controller, "Data Hub")
 
         ttk.Button(

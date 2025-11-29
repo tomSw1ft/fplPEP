@@ -3,6 +3,7 @@ import os
 import requests
 import pandas as pd
 import time
+from typing import List, Dict, Any, Optional, Tuple
 
 # --- CONFIGURATION ---
 NEXT_N_GW = 5
@@ -129,10 +130,6 @@ class FPLManager:
     def get_team_picks(self, team_id, event_id):
         url = BASE_URL + f"entry/{team_id}/event/{event_id}/picks/"
         return self.get_json(url)
-
-    def fetch_and_filter_data(self, role_id, max_budget, include_ids=None):
-        print("Fetching live FPL data...")
-        data = self.get_bootstrap_static()
 
     def get_processed_teams(self):
         data = self.get_bootstrap_static()
@@ -389,137 +386,52 @@ class FPLManager:
 
         return cap_score
 
-    def optimize_specific_squad(self, my_player_ids):
-        # 1. Get Context
-        event_id = self.get_current_event_id()
+    def _calculate_advanced_stats(
+        self, player: Dict[str, Any], history: List[Dict[str, Any]]
+    ) -> Dict[str, float]:
+        """Calculates advanced statistics based on player history."""
+        last_5 = history[-5:] if len(history) >= 5 else history
+        total_minutes_l5 = sum(h["minutes"] for h in last_5)
+        max_minutes_l5 = len(last_5) * 90
 
-        # Re-fetching bootstrap to get 'next' event specifically for planning
-        static_data = self.get_bootstrap_static()
-        next_event = None
-        for event in static_data["events"]:
-            if event["is_next"]:
-                next_event = event["id"]
-                break
-
-        if not next_event:
-            next_event = event_id + 1
-
-        print(f"Planning for Gameweek {next_event}...")
-
-        # 2. Get All Data
-        teams_data, df_all_players = self.fetch_and_filter_data(
-            None, 999.0, include_ids=my_player_ids
+        # 1. Minutes % (Last 5)
+        mins_percent_l5 = (
+            (total_minutes_l5 / max_minutes_l5 * 100) if max_minutes_l5 > 0 else 0
         )
 
-        # Filter for my players
-        my_squad = df_all_players[df_all_players["id"].isin(my_player_ids)].copy()
+        # 2. Avg Def Contributions per 90 (Last 5)
+        total_def_l5 = sum(h.get("defensive_contribution", 0) for h in last_5)
+        def_per_90 = (
+            (total_def_l5 / total_minutes_l5 * 90) if total_minutes_l5 > 0 else 0
+        )
 
-        # 4. Calculate XP and Captaincy Score for all 15
-        squad_xp = []
-        for _, player in my_squad.iterrows():
-            # Fetch full summary for history (minutes check)
-            summary = self.get_json(BASE_URL + f"element-summary/{player['id']}/")
-            fixtures = summary["fixtures"]
-            history = summary["history"]
+        # 3. Points per 90 (Last 5)
+        total_pts_l5 = sum(h["total_points"] for h in last_5)
+        pts_per_90_l5 = (
+            (total_pts_l5 / total_minutes_l5 * 90) if total_minutes_l5 > 0 else 0
+        )
 
-            xp, gw_points = self.calculate_xp(player, teams_data, fixtures)
+        # 4. Points per 90 per £m (Last 5)
+        price = player["now_cost"]
+        pts_per_90_per_m_l5 = (pts_per_90_l5 / price) if price > 0 else 0
 
-            # Extract just the next GW points for the lineup decision
-            next_gw_key = f"GW{next_event}"
-            next_gw_xp = gw_points.get(next_gw_key, 0)
+        return {
+            "mins_percent_l5": mins_percent_l5,
+            "def_per_90": def_per_90,
+            "pts_per_90_l5": pts_per_90_l5,
+            "pts_per_90_per_m_l5": pts_per_90_per_m_l5,
+        }
 
-            # --- CAPTAINCY SCORE CALCULATION ---
-            cap_score = self._calculate_cap_score(player, next_gw_xp, history)
-
-            # --- STATS CALCULATION (Last 5 Games) ---
-            last_5 = history[-5:] if len(history) >= 5 else history
-            total_minutes_l5 = sum(h["minutes"] for h in last_5)
-            max_minutes_l5 = len(last_5) * 90
-
-            # 1. Minutes % (Last 5)
-            mins_percent_l5 = (
-                (total_minutes_l5 / max_minutes_l5 * 100) if max_minutes_l5 > 0 else 0
-            )
-
-            # 2. Avg Def Contributions per 90 (Last 5)
-            # Using explicit 'defensive_contribution' field
-            total_def_l5 = sum(h.get("defensive_contribution", 0) for h in last_5)
-            def_per_90 = (
-                (total_def_l5 / total_minutes_l5 * 90) if total_minutes_l5 > 0 else 0
-            )
-
-            # 3. Points per 90 (Last 5)
-            total_pts_l5 = sum(h["total_points"] for h in last_5)
-            pts_per_90_l5 = (
-                (total_pts_l5 / total_minutes_l5 * 90) if total_minutes_l5 > 0 else 0
-            )
-
-            # 4. Points per 90 per £m (Last 5)
-            price = player["now_cost"]
-            pts_per_90_per_m_l5 = (pts_per_90_l5 / price) if price > 0 else 0
-
-            # --- NEXT FIXTURE (For Pitch View) ---
-            next_fixture = "?"
-            for f in fixtures:
-                if f.get("event") == next_event:
-                    is_home = f["is_home"]
-                    opponent_id = f["team_a"] if is_home else f["team_h"]
-                    opponent_name = teams_data[opponent_id]["name"]
-                    opponent_short = TEAM_SHORT_NAMES.get(
-                        opponent_name, opponent_name[:3].upper()
-                    )
-                    ha = "(H)" if is_home else "(A)"
-                    next_fixture = f"{opponent_short}{ha}"
-                    break
-
-            # 5. Upcoming Fixtures Data
-            upcoming_fixtures_data = []
-            for f in fixtures[:NEXT_N_GW]:
-                event = f.get("event")
-                if not event:
-                    continue
-
-                is_home = f["is_home"]
-                opponent_id = f["team_a"] if is_home else f["team_h"]
-                if opponent_id not in teams_data:
-                    continue
-
-                opponent_name = teams_data[opponent_id]["name"]
-                opponent_short = TEAM_SHORT_NAMES.get(
-                    opponent_name, opponent_name[:3].upper()
-                )
-                ha = "(H)" if is_home else "(A)"
-
-                gw_key = f"GW{event}"
-                xp_val = gw_points.get(gw_key, 0)
-
-                upcoming_fixtures_data.append(
-                    {"event": event, "opponent": f"{opponent_short}{ha}", "xp": xp_val}
-                )
-
-            squad_xp.append(
-                {
-                    "id": player["id"],
-                    "name": player["web_name"],
-                    "team": teams_data[player["team"]]["name"],
-                    "position": player["position"],  # 1=GK, 2=DEF, 3=MID, 4=FWD
-                    "xp": next_gw_xp,
-                    "total_xp": xp,
-                    "price": player["now_cost"],
-                    "cap_score": cap_score,
-                    "next_fixture": next_fixture,
-                    "form": player["form"],
-                    # New Stats
-                    "selected_by_percent": player["selected_by_percent"],
-                    "mins_percent_l5": mins_percent_l5,
-                    "def_per_90": def_per_90,
-                    "pts_per_90_l5": pts_per_90_l5,
-                    "pts_per_90_per_m_l5": pts_per_90_per_m_l5,
-                    "upcoming_fixtures": upcoming_fixtures_data,
-                }
-            )
-
-        # 5. Optimize Lineup
+    def _optimize_lineup(
+        self, squad_xp: List[Dict[str, Any]]
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+    ]:
+        """Selects the best starting XI and captain/vice-captain."""
+        # Sort by XP
         squad_xp.sort(key=lambda x: x["xp"], reverse=True)
 
         starters = []
@@ -570,6 +482,121 @@ class FPLManager:
         starters.sort(key=lambda x: x["cap_score"], reverse=True)
         captain = starters[0] if starters else None
         vice_captain = starters[1] if len(starters) > 1 else None
+
+        return starters, bench, captain, vice_captain
+
+    def optimize_specific_squad(
+        self, my_player_ids: List[int]
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+        int,
+    ]:
+        """Optimizes the lineup for a specific list of player IDs."""
+        # 1. Get Context
+        event_id = self.get_current_event_id()
+
+        # Re-fetching bootstrap to get 'next' event specifically for planning
+        static_data = self.get_bootstrap_static()
+        next_event = None
+        for event in static_data["events"]:
+            if event["is_next"]:
+                next_event = event["id"]
+                break
+
+        if not next_event:
+            next_event = event_id + 1
+
+        print(f"Planning for Gameweek {next_event}...")
+
+        # 2. Get All Data
+        teams_data, df_all_players = self.fetch_and_filter_data(
+            None, 999.0, include_ids=my_player_ids
+        )
+
+        # Filter for my players
+        my_squad = df_all_players[df_all_players["id"].isin(my_player_ids)].copy()
+
+        # 4. Calculate XP and Captaincy Score for all 15
+        squad_xp = []
+        for _, player in my_squad.iterrows():
+            # Fetch full summary for history (minutes check)
+            summary = self.get_json(BASE_URL + f"element-summary/{player['id']}/")
+            fixtures = summary["fixtures"]
+            history = summary["history"]
+
+            xp, gw_points = self.calculate_xp(player, teams_data, fixtures)
+
+            # Extract just the next GW points for the lineup decision
+            next_gw_key = f"GW{next_event}"
+            next_gw_xp = gw_points.get(next_gw_key, 0)
+
+            # --- CAPTAINCY SCORE CALCULATION ---
+            cap_score = self._calculate_cap_score(player, next_gw_xp, history)
+
+            # --- STATS CALCULATION ---
+            stats = self._calculate_advanced_stats(player, history)
+
+            # --- NEXT FIXTURE (For Pitch View) ---
+            next_fixture = "?"
+            for f in fixtures:
+                if f.get("event") == next_event:
+                    is_home = f["is_home"]
+                    opponent_id = f["team_a"] if is_home else f["team_h"]
+                    opponent_name = teams_data[opponent_id]["name"]
+                    opponent_short = TEAM_SHORT_NAMES.get(
+                        opponent_name, opponent_name[:3].upper()
+                    )
+                    ha = "(H)" if is_home else "(A)"
+                    next_fixture = f"{opponent_short}{ha}"
+                    break
+
+            # 5. Upcoming Fixtures Data
+            upcoming_fixtures_data = []
+            for f in fixtures[:NEXT_N_GW]:
+                event = f.get("event")
+                if not event:
+                    continue
+
+                is_home = f["is_home"]
+                opponent_id = f["team_a"] if is_home else f["team_h"]
+                if opponent_id not in teams_data:
+                    continue
+
+                opponent_name = teams_data[opponent_id]["name"]
+                opponent_short = TEAM_SHORT_NAMES.get(
+                    opponent_name, opponent_name[:3].upper()
+                )
+                ha = "(H)" if is_home else "(A)"
+
+                gw_key = f"GW{event}"
+                xp_val = gw_points.get(gw_key, 0)
+
+                upcoming_fixtures_data.append(
+                    {"event": event, "opponent": f"{opponent_short}{ha}", "xp": xp_val}
+                )
+
+            player_data = {
+                "id": player["id"],
+                "name": player["web_name"],
+                "team": teams_data[player["team"]]["name"],
+                "position": player["position"],  # 1=GK, 2=DEF, 3=MID, 4=FWD
+                "xp": next_gw_xp,
+                "total_xp": xp,
+                "price": player["now_cost"],
+                "cap_score": cap_score,
+                "next_fixture": next_fixture,
+                "form": player["form"],
+                "selected_by_percent": player["selected_by_percent"],
+                "upcoming_fixtures": upcoming_fixtures_data,
+            }
+            player_data.update(stats)
+            squad_xp.append(player_data)
+
+        # 5. Optimize Lineup
+        starters, bench, captain, vice_captain = self._optimize_lineup(squad_xp)
 
         return starters, bench, captain, vice_captain, next_event
 
