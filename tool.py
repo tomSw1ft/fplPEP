@@ -1,24 +1,53 @@
+import requests
 import json
 import os
-import requests
-import pandas as pd
 import time
-from typing import List, Dict, Any, Optional, Tuple
+import pandas as pd
+from typing import List, Dict, Any, Tuple, Optional
 
 # --- CONFIGURATION ---
 NEXT_N_GW = 5
+USE_THREAT_MODEL = True  # Toggle for xG/xA based model
 BASE_URL = "https://fantasy.premierleague.com/api/"
 CUSTOM_FDR_FILE = "custom_fdr.json"
 
+# --- CONSTANTS ---
+# Players who are primary penalty takers (approximate list, update as needed)
+PENALTY_TAKERS = [
+    "Haaland",
+    "Salah",
+    "Palmer",
+    "Saka",
+    "Fernandes",
+    "Isak",
+    "Mbeumo",
+    "Solanke",
+    "Watkins",
+]
+
+# Players who take corners/free kicks
+SET_PIECE_TAKERS = [
+    "Alexander-Arnold",
+    "De Bruyne",
+    "Fernandes",
+    "Saka",
+    "Rice",
+    "Eze",
+    "Maddison",
+    "Bowen",
+    "Gordon",
+]
+
 
 class FPLManager:
+    CACHE_DURATION = 300  # 5 minutes
+
     def __init__(self):
         self.session = requests.Session()
         self.bootstrap_static_cache = None
         self.last_fetch_time = 0
-        self.CACHE_DURATION = 300  # 5 minutes
-        self.custom_fdr = self.load_custom_fdr()
         self.team_short_names = {}
+        self.custom_fdr = self.load_custom_fdr()
 
     def load_custom_fdr(self):
         if os.path.exists(CUSTOM_FDR_FILE):
@@ -29,47 +58,14 @@ class FPLManager:
                 print(f"Error loading custom FDR: {e}")
         return {}
 
-    def save_custom_fdr(self, data):
-        self.custom_fdr = data
+    def save_custom_fdr(self):
         try:
             with open(CUSTOM_FDR_FILE, "w") as f:
-                json.dump(data, f, indent=4)
+                json.dump(self.custom_fdr, f, indent=4)
         except Exception as e:
             print(f"Error saving custom FDR: {e}")
 
-    def get_fixture_difficulty(self, fixture, team_id, teams_data):
-        """
-        Calculates difficulty for team_id in a specific fixture.
-        Checks for custom overrides first.
-        """
-        is_home = fixture["team_h"] == team_id
-        opponent_id = fixture["team_a"] if is_home else fixture["team_h"]
-
-        # Default API difficulty
-        if "team_h_difficulty" in fixture:
-            default_diff = (
-                fixture["team_h_difficulty"]
-                if is_home
-                else fixture["team_a_difficulty"]
-            )
-        else:
-            # Fallback for player summary fixtures
-            default_diff = fixture.get("difficulty", 3)
-
-        # Check for Custom Override
-        if opponent_id not in teams_data:
-            return default_diff
-
-        opponent_name = teams_data[opponent_id]["name"]
-
-        if opponent_name in self.custom_fdr:
-            strength_type = "A" if is_home else "H"
-            return int(self.custom_fdr[opponent_name].get(strength_type, default_diff))
-
-        return default_diff
-
     def get_json(self, url):
-        """Helper to fetch JSON from API."""
         try:
             response = self.session.get(url)
             if response.status_code != 200:
@@ -168,29 +164,23 @@ class FPLManager:
                         "now_cost": p["now_cost"] / 10,
                         "chance_of_playing": p["chance_of_playing_next_round"],
                         "selected_by_percent": float(p["selected_by_percent"]),
+                        "status": p["status"],
                     }
                 )
 
         return teams, pd.DataFrame(players)
 
-    def get_fixtures(self, player_id):
-        return self.get_json(BASE_URL + f"element-summary/{player_id}/")["fixtures"]
+    def get_team_details(self, team_id):
+        """Fetches team entry details including bank."""
+        return self.get_json(BASE_URL + f"entry/{team_id}/")
 
     def get_all_team_fixtures(self, next_n_gw=None):
         """Fetches upcoming fixtures for all teams for FDR grid."""
         data = self.get_bootstrap_static()
-        teams = {t["id"]: t for t in data["teams"]}
-
-        # We need to build a schedule.
-        # The bootstrap-static data has 'events' but not a simple "next 5 fixtures for team X" list easily accessible without parsing.
-        # However, we can use the 'fixtures' endpoint or parse 'elements' fixtures if we want to avoid 20 calls.
-        # BUT, the most reliable way for *teams* is the fixtures endpoint.
-        # To avoid 20 API calls, we can fetch ALL fixtures and filter.
+        teams = self.get_processed_teams()
 
         all_fixtures = self.get_json(BASE_URL + "fixtures/")
 
-        # Filter for future
-        # Find the first unfinished event to ensure we only show upcoming fixtures
         start_event = 1
         for event in data["events"]:
             if not event["finished"]:
@@ -210,7 +200,6 @@ class FPLManager:
             h = f["team_h"]
             a = f["team_a"]
 
-            # Use Custom Difficulty
             diff_h = self.get_fixture_difficulty(f, h, teams)
             diff_a = self.get_fixture_difficulty(f, a, teams)
 
@@ -242,15 +231,12 @@ class FPLManager:
                     }
                 )
 
-        # Sort by event
         results = []
         for t_id, fixtures in team_schedule.items():
             fixtures.sort(key=lambda x: x["event"])
-            # Keep only next N
             if next_n_gw:
                 fixtures = fixtures[:next_n_gw]
 
-            # Calculate total difficulty (lower is better)
             total_diff = sum(f["difficulty"] for f in fixtures)
 
             results.append(
@@ -262,6 +248,43 @@ class FPLManager:
             )
 
         return sorted(results, key=lambda x: x["total_difficulty"])
+
+    def get_fixture_difficulty(self, fixture, team_id, teams):
+        """Calculates fixture difficulty based on opponent strength."""
+        if fixture["team_h"] == team_id:
+            opponent_id = fixture["team_a"]
+            is_home = True
+        else:
+            opponent_id = fixture["team_h"]
+            is_home = False
+
+        opponent = teams[opponent_id]
+
+        # Base difficulty from FDR (if available in future, currently using strength)
+        # Using team strength directly
+
+        if is_home:
+            # We are home, opponent is away. Use opponent's away strength vs our home strength?
+            # Simplified: Just use opponent overall strength
+            opponent_strength = (opponent["strength_d"] + opponent["strength_a"]) / 2
+        else:
+            opponent_strength = (opponent["strength_d"] + opponent["strength_a"]) / 2
+
+        # Normalize to 1-5 scale roughly
+        # 1000 is avg.
+        # < 1050: 2
+        # 1050-1150: 3
+        # 1150-1250: 4
+        # > 1250: 5
+
+        if opponent_strength < 1050:
+            return 2
+        elif opponent_strength < 1150:
+            return 3
+        elif opponent_strength < 1250:
+            return 4
+        else:
+            return 5
 
     def _calculate_fixture_multiplier(self, difficulty):
         return 1.0 + ((3 - difficulty) * 0.08)
@@ -297,11 +320,128 @@ class FPLManager:
                 else:
                     return 0.9  # Normal/Weak Attack vs Strong Defense -> Disadvantage
 
-    def calculate_xp(self, player, teams, fixtures):
+    def _calculate_weighted_form(self, history):
+        """Calculates weighted form giving more importance to recent games."""
+        if not history:
+            return 0.0
+
+        # Use last 5 games
+        recent = history[-5:]
+        # Weights: 1.0, 0.9, 0.8, 0.7, 0.6 (most recent first)
+        weights = [1.0, 0.9, 0.8, 0.7, 0.6]
+
+        total_weighted_pts = 0
+        total_weights = 0
+
+        # Iterate backwards
+        for i, game in enumerate(reversed(recent)):
+            if i < len(weights):
+                w = weights[i]
+                total_weighted_pts += game["total_points"] * w
+                total_weights += w
+
+        return total_weighted_pts / total_weights if total_weights > 0 else 0.0
+
+    def _calculate_weighted_metric(self, history, metric_key):
+        """Calculates weighted average of a specific metric (e.g., expected_goals)."""
+        if not history:
+            return 0.0
+
+        # Use last 5 games
+        recent = history[-5:]
+        weights = [1.0, 0.9, 0.8, 0.7, 0.6]
+
+        total_weighted = 0
+        total_weights = 0
+
+        for i, game in enumerate(reversed(recent)):
+            if i < len(weights):
+                w = weights[i]
+                # Handle string values if necessary (API sometimes returns strings)
+                val = float(game.get(metric_key, 0) or 0)
+                total_weighted += val * w
+                total_weights += w
+
+        return total_weighted / total_weights if total_weights > 0 else 0.0
+
+    def _calculate_weighted_minutes(self, history):
+        """Calculates weighted average of minutes played."""
+        return self._calculate_weighted_metric(history, "minutes")
+
+    def _calculate_cs_probability(self, team_strength_d, opponent_strength_a):
+        """Estimates Clean Sheet probability (0.0 to 1.0)."""
+        # Base logic: If Def > Att, higher chance.
+        diff = team_strength_d - opponent_strength_a
+
+        # Sigmoid-like scaling
+        # 0 diff -> ~0.30 (30%)
+        # +200 diff -> ~0.50 (50%)
+        # -200 diff -> ~0.10 (10%)
+
+        base_prob = 0.30
+        adjustment = diff * 0.001  # 100 diff = +0.10
+
+        prob = base_prob + adjustment
+        return max(0.05, min(0.80, prob))
+
+    def _calculate_save_points(self, team_strength_d, opponent_strength_a):
+        """Estimates Save Points for GKs."""
+        # If Def is weak and Opp Att is strong, more saves.
+        diff = opponent_strength_a - team_strength_d
+
+        if diff > 100:
+            return 1.0  # ~3 saves
+        elif diff > 0:
+            return 0.5  # ~1-2 saves
+        return 0.2
+
+    def calculate_xp(self, player, teams, fixtures, history):
         total_xp = 0
         gw_points = {}
 
-        base_potential = (player["form"] * 0.4) + (player["points_per_game"] * 0.6)
+        # 1. Weighted Form & Minutes
+        weighted_form = self._calculate_weighted_form(history)
+        expected_minutes = self._calculate_weighted_minutes(history)
+
+        # Calculate expected appearance points based on minutes
+        if expected_minutes >= 60:
+            expected_app_points = 2.0
+        elif expected_minutes > 0:
+            expected_app_points = 1.0
+        else:
+            expected_app_points = 0.0
+
+        # 2. Base Potential
+        if USE_THREAT_MODEL:
+            # THREAT MODEL: Based on xG and xA
+            weighted_xg = self._calculate_weighted_metric(history, "expected_goals")
+            weighted_xa = self._calculate_weighted_metric(history, "expected_assists")
+
+            # Points per Goal
+            pos = player["position"]
+            if pos == 1 or pos == 2:  # GK/DEF
+                pts_per_goal = 6
+            elif pos == 3:  # MID
+                pts_per_goal = 5
+            else:  # FWD
+                pts_per_goal = 4
+
+            xp_goals = weighted_xg * pts_per_goal
+            xp_assists = weighted_xa * 3
+
+            # Bonus Potential & Explosiveness
+            # Boosted to 1.3 to account for BPS and high-performing variance
+            base_attack_potential = (xp_goals + xp_assists) * 1.3
+
+        else:
+            # LEGACY MODEL: Based on Past Points
+            # Scale PPG by expected minutes ratio (assuming 90 mins is standard)
+            # If they usually play 90, ratio is 1.0. If they play 0, ratio is 0.0.
+            minutes_ratio = min(1.0, expected_minutes / 90.0)
+
+            base_attack_potential = (weighted_form * 0.6) + (
+                float(player["points_per_game"]) * minutes_ratio * 0.4
+            )
 
         upcoming = fixtures[:NEXT_N_GW]
 
@@ -314,20 +454,78 @@ class FPLManager:
                 continue
 
             opponent = teams[opponent_id]
+            my_team = teams[player["team"]]
 
             # --- FIXTURE MODIFIERS ---
-            # Use Custom Difficulty
             difficulty = self.get_fixture_difficulty(f, player["team"], teams)
             fixture_mult = self._calculate_fixture_multiplier(difficulty)
 
             # --- MATCHUP MODIFIERS ---
-            my_team = teams[player["team"]]
             matchup_mult = self._calculate_matchup_multiplier(player, opponent, my_team)
 
             # --- HOME ADVANTAGE ---
             venue_mult = 1.1 if is_home else 0.95
 
-            gw_xp = base_potential * fixture_mult * venue_mult * matchup_mult
+            # --- POSITIONAL LOGIC ---
+
+            # A. Clean Sheet Probability
+            cs_prob = self._calculate_cs_probability(
+                my_team["strength_d"], opponent["strength_a"]
+            )
+            if is_home:
+                cs_prob += 0.05
+
+            # B. Expected Points Calculation
+            gw_xp = 0
+
+            if USE_THREAT_MODEL:
+                # THREAT MODEL: Separate Appearance from Performance
+                gw_xp += expected_app_points  # Unscaled by difficulty
+
+                performance_xp = 0
+                if player["position"] == 1:  # GK
+                    performance_xp += cs_prob * 4.0
+                    performance_xp += self._calculate_save_points(
+                        my_team["strength_d"], opponent["strength_a"]
+                    )
+                elif player["position"] == 2:  # DEF
+                    performance_xp += cs_prob * 4.0
+                    performance_xp += base_attack_potential * 0.1 * matchup_mult
+                elif player["position"] == 3:  # MID
+                    performance_xp += cs_prob * 1.0
+                    performance_xp += base_attack_potential * 0.8 * matchup_mult
+                elif player["position"] == 4:  # FWD
+                    performance_xp += base_attack_potential * 1.0 * matchup_mult
+
+                # Apply multipliers to performance only
+                performance_xp *= fixture_mult * venue_mult
+                gw_xp += performance_xp
+
+            else:
+                # LEGACY MODEL: Everything scaled (Appearance baked in)
+                step_xp = 0
+                if player["position"] == 1:  # GK
+                    step_xp += cs_prob * 4.0
+                    step_xp += self._calculate_save_points(
+                        my_team["strength_d"], opponent["strength_a"]
+                    )
+                elif player["position"] == 2:  # DEF
+                    step_xp += cs_prob * 4.0
+                    step_xp += base_attack_potential * 0.1 * matchup_mult
+                elif player["position"] == 3:  # MID
+                    step_xp += cs_prob * 1.0
+                    step_xp += base_attack_potential * 0.8 * matchup_mult
+                elif player["position"] == 4:  # FWD
+                    step_xp += base_attack_potential * 1.0 * matchup_mult
+
+                step_xp *= fixture_mult * venue_mult
+                gw_xp += step_xp
+
+            # --- SET PIECES ---
+            if player["web_name"] in PENALTY_TAKERS:
+                gw_xp *= 1.15
+            if player["web_name"] in SET_PIECE_TAKERS:
+                gw_xp *= 1.05
 
             # Adjust for availability (e.g. 75% flag)
             chance = player["chance_of_playing"]
@@ -342,6 +540,12 @@ class FPLManager:
             gw_event = f.get("event")
             if gw_event:
                 gw_points[f"GW{gw_event}"] = round(final_gw_xp, 2)
+
+            # Enrich fixture data for GUI
+            f["opponent"] = (
+                opponent["short_name"] if "short_name" in opponent else opponent["name"]
+            )
+            f["xp"] = final_gw_xp
 
         return total_xp, gw_points
 
@@ -468,6 +672,20 @@ class FPLManager:
 
         return starters, bench, captain, vice_captain
 
+    def optimize_team(self, team_id):
+        """Optimizes the lineup for a specific team ID."""
+        # 1. Get current event to fetch *current* squad
+        event_id = self.get_current_event_id()
+
+        # 2. Fetch picks
+        picks_data = self.get_team_picks(team_id, event_id)
+
+        # 3. Extract IDs
+        my_player_ids = [p["element"] for p in picks_data["picks"]]
+
+        # 4. Optimize
+        return self.optimize_specific_squad(my_player_ids)
+
     def optimize_specific_squad(
         self, my_player_ids: List[int]
     ) -> Tuple[
@@ -506,225 +724,40 @@ class FPLManager:
         squad_xp = []
         for _, player in my_squad.iterrows():
             # Fetch full summary for history (minutes check)
-            summary = self.get_json(BASE_URL + f"element-summary/{player['id']}/")
-            fixtures = summary["fixtures"]
-            history = summary["history"]
+            fixtures, history = self.get_player_summary(player["id"])
 
-            xp, gw_points = self.calculate_xp(player, teams_data, fixtures)
+            xp, gw_points = self.calculate_xp(player, teams_data, fixtures, history)
 
-            # Extract just the next GW points for the lineup decision
+            # Next GW XP for captaincy
             next_gw_key = f"GW{next_event}"
-            next_gw_xp = gw_points.get(next_gw_key, 0)
+            next_gw_xp = gw_points.get(next_gw_key, 0.0)
 
-            # --- CAPTAINCY SCORE CALCULATION ---
             cap_score = self._calculate_cap_score(player, next_gw_xp, history)
 
-            # --- STATS CALCULATION ---
+            # Advanced Stats
             stats = self._calculate_advanced_stats(player, history)
 
-            # --- NEXT FIXTURE (For Pitch View) ---
-            next_fixture = "?"
-            for f in fixtures:
-                if f.get("event") == next_event:
-                    is_home = f["is_home"]
-                    opponent_id = f["team_a"] if is_home else f["team_h"]
-                    opponent_name = teams_data[opponent_id]["name"]
-                    opponent_short = self.team_short_names.get(
-                        opponent_name, opponent_name[:3].upper()
-                    )
-                    ha = "(H)" if is_home else "(A)"
-                    next_fixture = f"{opponent_short}{ha}"
-                    break
+            # Combine Data
+            p_data = player.to_dict()
+            p_data.update(stats)
+            # CRITICAL FIX: Optimization uses "xp" key for sorting.
+            # We want to optimize for the NEXT GAMEWEEK, not the total 5GW.
+            p_data["xp"] = next_gw_xp
+            p_data["cap_score"] = cap_score
+            p_data["upcoming_fixtures"] = fixtures[:NEXT_N_GW]
+            p_data["total_xp"] = xp  # Store total 5GW XP for display
 
-            # 5. Upcoming Fixtures Data
-            upcoming_fixtures_data = []
-            for f in fixtures[:NEXT_N_GW]:
-                event = f.get("event")
-                if not event:
-                    continue
+            # Add GW points
+            for k, v in gw_points.items():
+                p_data[k] = v
 
-                is_home = f["is_home"]
-                opponent_id = f["team_a"] if is_home else f["team_h"]
-                if opponent_id not in teams_data:
-                    continue
+            squad_xp.append(p_data)
 
-                opponent_name = teams_data[opponent_id]["name"]
-                opponent_short = self.team_short_names.get(
-                    opponent_name, opponent_name[:3].upper()
-                )
-                ha = "(H)" if is_home else "(A)"
-
-                gw_key = f"GW{event}"
-                xp_val = gw_points.get(gw_key, 0)
-
-                upcoming_fixtures_data.append(
-                    {"event": event, "opponent": f"{opponent_short}{ha}", "xp": xp_val}
-                )
-
-            player_data = {
-                "id": player["id"],
-                "name": player["web_name"],
-                "team": teams_data[player["team"]]["name"],
-                "position": player["position"],  # 1=GK, 2=DEF, 3=MID, 4=FWD
-                "xp": next_gw_xp,
-                "total_xp": xp,
-                "price": player["now_cost"],
-                "cap_score": cap_score,
-                "next_fixture": next_fixture,
-                "form": player["form"],
-                "selected_by_percent": player["selected_by_percent"],
-                "upcoming_fixtures": upcoming_fixtures_data,
-            }
-            player_data.update(stats)
-            squad_xp.append(player_data)
-
-        # 5. Optimize Lineup
         starters, bench, captain, vice_captain = self._optimize_lineup(squad_xp)
 
         return starters, bench, captain, vice_captain, next_event
 
-    def optimize_team(self, team_id):
-        print(f"Optimizing team {team_id}...")
-
-        # 1. Get Context
-        event_id = self.get_current_event_id()
-
-        # 2. Get My Team
-        picks_data = self.get_team_picks(team_id, event_id)
-        if not picks_data:
-            raise Exception("Could not fetch team data.")
-
-        my_player_ids = [p["element"] for p in picks_data["picks"]]
-
-        return self.optimize_specific_squad(my_player_ids)
-
-    def get_captaincy_candidates(self, team_id):
-        """Returns detailed stats for top 5 captaincy options."""
-        # Reuse optimization logic to get XP and Cap Scores
-        starters, bench, _, _, next_event = self.optimize_team(team_id)
-
-        all_players = starters + bench
-        # Sort by Cap Score
-        all_players.sort(key=lambda x: x["cap_score"], reverse=True)
-
-        top_candidates = all_players[:5]
-
-        return top_candidates, next_event
-
-    def search_player(self, query):
-        data = self.get_bootstrap_static()
-        results = []
-        query = query.lower()
-
-        teams = {t["id"]: t["name"] for t in data["teams"]}
-
-        for p in data["elements"]:
-            if (
-                query in p["web_name"].lower()
-                or query in p["first_name"].lower()
-                or query in p["second_name"].lower()
-            ):
-                # Return full player object plus team name for display
-                p_full = p.copy()
-                p_full["team_name"] = teams[p["team"]]
-                # Normalize cost
-                p_full["now_cost"] = p["now_cost"] / 10
-                results.append(p_full)
-
-                if len(results) >= 20:
-                    break
-
-        return results
-
-
-def get_user_requirements():
-    """
-    Interactive prompts to filter players by Role and Budget.
-    """
-    print("\n--- FPL TRANSFER RECOMMENDER ---")
-
-    # 1. Select Role
-    role_map = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
-    while True:
-        role_input = (
-            input("Which role do you need? (GK / DEF / MID / FWD): ").upper().strip()
-        )
-        if role_input in role_map:
-            selected_role_id = role_map[role_input]
-            break
-        print("Invalid selection. Please type GK, DEF, MID, or FWD.")
-
-    # 2. Select Budget
-    while True:
-        try:
-            budget_input = input(
-                f"What is your max budget for this {role_input}? (e.g., 6.0): "
-            )
-            max_budget = float(budget_input)
-            break
-        except ValueError:
-            print("Please enter a valid number (e.g., 5.5).")
-
-    return selected_role_id, max_budget, role_input
-
-
-def main():
-    manager = FPLManager()
-
-    # 1. Get User Input
-    role_id, max_budget, role_name = get_user_requirements()
-
-    # 2. Get Data
-    teams, df_players = manager.fetch_and_filter_data(role_id, max_budget)
-
-    if df_players.empty:
-        print(f"No players found for {role_name} under £{max_budget}m.")
-        return
-
-    # 3. Sort by Form to limit API calls (Analyze top 20 candidates)
-    candidates = df_players.sort_values(by="form", ascending=False).head(30)
-
-    results = []
-    print(f"\nAnalyzing top 20 {role_name} candidates under £{max_budget}m...")
-    print("(This may take 10-15 seconds)...")
-
-    for _, player in candidates.iterrows():
-        try:
-            time.sleep(0.05)  # Be polite to API
-            fixtures = manager.get_fixtures(player["id"])
-            xp, gw_points = manager.calculate_xp(player, teams, fixtures)
-
-            row = {
-                "Name": player["web_name"],
-                "Team": teams[player["team"]]["name"],
-                "Price": f"£{player['now_cost']}m",
-                "Form": player["form"],
-                "Predicted_Pts": round(xp, 2),
-            }
-            # Add per-GW columns
-            row.update(gw_points)
-            results.append(row)
-        except Exception as e:
-            print(f"Error processing player {player['web_name']}: {e}")
-            continue
-
-    # 4. Show Results
-    final_df = (
-        pd.DataFrame(results).sort_values(by="Predicted_Pts", ascending=False).head(10)
-    )
-
-    print(f"\n--- TOP 10 REPLACEMENTS FOR GABRIEL ({role_name}) ---")
-    # Clean table output
-    # Fill NaN with - for missing gameweeks if any
-    print(final_df.fillna("-").to_string(index=False))
-
-    # Recommendation logic
-    if not final_df.empty:
-        top_pick = final_df.iloc[0]
-        print(
-            f"\n💡 ALGORITHM RECOMMENDATION: Transfer in **{top_pick['Name']}** ({top_pick['Team']})"
-        )
-
-
-if __name__ == "__main__":
-    main()
+    def get_player_summary(self, player_id):
+        """Returns (fixtures, history) for a player."""
+        data = self.get_json(BASE_URL + f"element-summary/{player_id}/")
+        return data["fixtures"], data["history"]

@@ -105,6 +105,8 @@ class FPLApp:
             "current_squad_ids": [],
             "current_squad_data": {},
             "status": "idle",
+            "bank": 0.0,
+            "history": [],
         }
 
         self.main_container = tk.Frame(root, bg=COLORS["bg"])
@@ -167,6 +169,15 @@ class FPLApp:
                 "next_event": next_event,
             }
             self.shared_state["optimization_data"] = display_data
+
+            # Fetch team details (bank)
+            try:
+                team_details = self.manager.get_team_details(team_id)
+                bank = team_details.get("last_deadline_bank", 0) / 10.0
+                self.shared_state["bank"] = bank
+            except Exception as e:
+                print(f"Error fetching team details: {e}")
+
             self.root.after(0, self._optimization_complete)
 
         except Exception as e:
@@ -589,8 +600,10 @@ class TransferFrame(BaseViewFrame):
                 )
                 try:
                     time.sleep(0.05)
-                    fixtures = self.manager.get_fixtures(player["id"])
-                    xp, gw_points = self.manager.calculate_xp(player, teams, fixtures)
+                    fixtures, history = self.manager.get_player_summary(player["id"])
+                    xp, gw_points = self.manager.calculate_xp(
+                        player, teams, fixtures, history
+                    )
                     gw_str = ", ".join([f"{k}:{v}" for k, v in gw_points.items()])
                     results.append(
                         {
@@ -670,6 +683,9 @@ class OptimizerBaseFrame(BaseViewFrame):
         self.gw_label = ttk.Label(self.input_frame, text="", style="CardTitle.TLabel")
         self.gw_label.pack(side=tk.RIGHT, padx=20)
 
+        self.bank_label = ttk.Label(self.input_frame, text="", style="CardTitle.TLabel")
+        self.bank_label.pack(side=tk.RIGHT, padx=20)
+
         self.progress = ttk.Progressbar(
             self, orient=tk.HORIZONTAL, mode="indeterminate"
         )
@@ -691,6 +707,9 @@ class OptimizerBaseFrame(BaseViewFrame):
 
         next_event = data.get("next_event", "?")
         self.gw_label.config(text=f"Gameweek {next_event}")
+
+        bank = self.state.get("bank", 0.0)
+        self.bank_label.config(text=f"Bank: £{bank}m")
 
         self.update_view(data)
 
@@ -784,7 +803,7 @@ class FormationFrame(OptimizerBaseFrame):
             )
 
         self.pitch_canvas.create_text(
-            x, y + 25, text=p["name"], fill="white", font=FONTS["bold"]
+            x, y + 25, text=p["web_name"], fill="white", font=FONTS["bold"]
         )
         fixture_text = p.get("next_fixture", "-")
         self.pitch_canvas.create_text(
@@ -983,8 +1002,10 @@ class PlayerSearchDialog(tk.Toplevel):
             )
             try:
                 time.sleep(0.05)
-                fixtures = self.manager.get_fixtures(player["id"])
-                xp, gw_points = self.manager.calculate_xp(player, teams, fixtures)
+                fixtures, history = self.manager.get_player_summary(player["id"])
+                xp, gw_points = self.manager.calculate_xp(
+                    player, teams, fixtures, history
+                )
                 gw_str = ", ".join([f"{k}:{v}" for k, v in gw_points.items()])
 
                 # Handle team name
@@ -1064,6 +1085,10 @@ class DataFrame(OptimizerBaseFrame):
             self.input_frame, text="Simulate Transfer", command=self.on_transfer_click
         ).pack(side=tk.RIGHT, padx=20)
 
+        ttk.Button(
+            self.input_frame, text="Undo Transfer", command=self.undo_transfer
+        ).pack(side=tk.RIGHT, padx=5)
+
         # Table
         columns = (
             "Status",
@@ -1136,7 +1161,7 @@ class DataFrame(OptimizerBaseFrame):
                 ]
             )
 
-            display_name = p["name"]
+            display_name = p["web_name"]
             row_tag = ""
 
             if p["id"] == cap_id:
@@ -1154,7 +1179,7 @@ class DataFrame(OptimizerBaseFrame):
                     p["status"],
                     display_name,
                     self.get_pos_name(p["position"]),
-                    f"£{p['price']}m",
+                    f"£{p['now_cost']}m",
                     f"{round(p.get('mins_percent_l5', 0), 1)}%",
                     f"{p.get('selected_by_percent', 0)}%",
                     round(p.get("def_per_90", 0), 2),
@@ -1178,9 +1203,13 @@ class DataFrame(OptimizerBaseFrame):
         player_data = self.state["current_squad_data"].get(player_out_id)
         initial_criteria = None
         if player_data:
+            # Max Budget = Player Price + Bank
+            bank = self.state.get("bank", 0.0)
+            max_budget = player_data["now_cost"] + bank
+
             initial_criteria = {
                 "role_id": player_data["position"],
-                "budget": player_data["price"],
+                "budget": max_budget,
             }
 
         PlayerSearchDialog(
@@ -1191,11 +1220,58 @@ class DataFrame(OptimizerBaseFrame):
             exclude_ids=self.state.get("current_squad_ids", []),
         )
 
+    def undo_transfer(self):
+        history = self.state.get("history", [])
+        if not history:
+            messagebox.showinfo("Undo", "No transfers to undo.")
+            return
+
+        last_state = history.pop()
+        self.state["current_squad_ids"] = last_state["ids"]
+        self.state["bank"] = last_state["bank"]
+
+        self.controller.run_global_optimization_with_ids(last_state["ids"])
+
     def perform_transfer(self, player_out_id, player_in_id):
         current_ids = self.state["current_squad_ids"]
+
+        # Save state for Undo
+        self.state["history"].append(
+            {"ids": list(current_ids), "bank": self.state.get("bank", 0.0)}
+        )
+
         if player_out_id in current_ids:
             new_ids = [pid for pid in current_ids if pid != player_out_id]
             new_ids.append(player_in_id)
+
+            # Update Bank
+            # We need prices. We have player_out_id price in current_squad_data.
+            # We need player_in_id price. We can fetch it or pass it.
+            # Ideally pass it, but for now let's fetch/find it.
+            # Actually, perform_transfer is called from PlayerSearchDialog which knows the price.
+            # But changing signature might break things.
+            # Let's just fetch it quickly or look it up if possible.
+            # Manager has get_player_summary but that's heavy.
+            # Let's use manager.get_bootstrap_static if cached or just fetch element summary.
+            # Better: PlayerSearchDialog passed the ID.
+            # Let's just fetch the single player data to get price.
+            try:
+                # Get Player Out Price
+                p_out = self.state["current_squad_data"].get(player_out_id)
+                price_out = p_out["now_cost"] if p_out else 0.0
+                # Or just fetch bootstrap-static again (it's cached).
+                data = self.manager.get_bootstrap_static()
+                p_in = next(
+                    (p for p in data["elements"] if p["id"] == player_in_id), None
+                )
+                price_in = (p_in["now_cost"] / 10.0) if p_in else 0.0
+
+                current_bank = self.state.get("bank", 0.0)
+                new_bank = current_bank + (price_out - price_in)
+                self.state["bank"] = round(new_bank, 1)
+
+            except Exception as e:
+                print(f"Error updating bank: {e}")
 
             self.controller.run_global_optimization_with_ids(new_ids)
         else:
