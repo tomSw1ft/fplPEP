@@ -58,7 +58,9 @@ class FPLManager:
                 print(f"Error loading custom FDR: {e}")
         return {}
 
-    def save_custom_fdr(self):
+    def save_custom_fdr(self, new_settings=None):
+        if new_settings:
+            self.custom_fdr = new_settings
         try:
             with open(CUSTOM_FDR_FILE, "w") as f:
                 json.dump(self.custom_fdr, f, indent=4)
@@ -259,6 +261,25 @@ class FPLManager:
             is_home = False
 
         opponent = teams[opponent_id]
+        opponent_name = opponent["name"]
+
+        # Check Custom FDR first
+        if self.custom_fdr and opponent_name in self.custom_fdr:
+            # Custom FDR structure: "Arsenal": {"H": 5, "A": 4}
+            # "H" means difficulty when Arsenal is HOME.
+            # "A" means difficulty when Arsenal is AWAY.
+
+            if is_home:
+                # We are Home, Opponent is Away.
+                # We want difficulty of Opponent (Away).
+                custom_val = self.custom_fdr[opponent_name].get("A")
+            else:
+                # We are Away, Opponent is Home.
+                # We want difficulty of Opponent (Home).
+                custom_val = self.custom_fdr[opponent_name].get("H")
+
+            if custom_val is not None:
+                return int(custom_val)
 
         # Base difficulty from FDR (if available in future, currently using strength)
         # Using team strength directly
@@ -289,36 +310,45 @@ class FPLManager:
     def _calculate_fixture_multiplier(self, difficulty):
         return 1.0 + ((3 - difficulty) * 0.08)
 
-    def _calculate_matchup_multiplier(self, player, opponent, my_team):
+    def _calculate_matchup_multiplier(
+        self, player, opponent_difficulty, my_team_difficulty
+    ):
+        # opponent_difficulty: 1 (Easy) to 5 (Hard). Represents Opponent Strength.
+        # my_team_difficulty: 1 (Easy) to 5 (Hard). Represents My Team Strength.
+
         if player["position"] in [1, 2]:  # GK/DEF
-            # We want Opponent Attack (strength_a) to be LOW
-            if opponent["strength_a"] < 1050:
-                # Opponent attack is weak. Do we have a weak defense?
-                if my_team["strength_d"] < 1050:
+            # We want Opponent to be Weak (Low Difficulty)
+            if opponent_difficulty <= 2:
+                # Weak Opponent
+                if my_team_difficulty <= 2:
                     return 1.0  # Weak vs Weak -> Neutral
                 else:
-                    return 1.1  # Good/Normal Defense vs Weak Attack -> Advantage
-            else:
-                # Opponent attack is decent/strong. Do we have a strong defense?
-                if my_team["strength_d"] > 1250:
+                    return 1.1  # Strong Defense vs Weak Attack -> Advantage
+            elif opponent_difficulty >= 4:
+                # Strong Opponent
+                if my_team_difficulty >= 4:
                     return 1.0  # Strong Defense holds up -> Neutral
                 else:
-                    return 0.9  # Normal/Weak Defense vs Strong Attack -> Disadvantage
+                    return 0.9  # Weak Defense vs Strong Attack -> Disadvantage
+            else:
+                return 1.0
 
         else:  # MID/FWD
-            # We want Opponent Defense (strength_d) to be LOW
-            if opponent["strength_d"] < 1050:
-                # Opponent defense is weak. Do we have a weak attack?
-                if my_team["strength_a"] < 1050:
-                    return 1.0  # Weak vs Weak -> Neutral
+            # We want Opponent to be Weak (Low Difficulty)
+            if opponent_difficulty <= 2:
+                # Weak Opponent Defense
+                if my_team_difficulty <= 2:
+                    return 1.0  # Weak Attack vs Weak Defense -> Neutral
                 else:
-                    return 1.1  # Good/Normal Attack vs Weak Defense -> Advantage
-            else:
-                # Opponent defense is decent/strong. Do we have a strong attack?
-                if my_team["strength_a"] > 1250:
+                    return 1.1  # Strong Attack vs Weak Defense -> Advantage
+            elif opponent_difficulty >= 4:
+                # Strong Opponent Defense
+                if my_team_difficulty >= 4:
                     return 1.0  # Strong Attack breaks through -> Neutral
                 else:
-                    return 0.9  # Normal/Weak Attack vs Strong Defense -> Disadvantage
+                    return 0.9  # Weak Attack vs Strong Defense -> Disadvantage
+            else:
+                return 1.0
 
     def _calculate_weighted_form(self, history):
         """Calculates weighted form giving more importance to recent games."""
@@ -368,28 +398,26 @@ class FPLManager:
         """Calculates weighted average of minutes played."""
         return self._calculate_weighted_metric(history, "minutes")
 
-    def _calculate_cs_probability(self, team_strength_d, opponent_strength_a):
-        """Estimates Clean Sheet probability (0.0 to 1.0)."""
-        # Base logic: If Def > Att, higher chance.
-        diff = team_strength_d - opponent_strength_a
+    def _calculate_cs_probability(self, my_team_difficulty, opponent_difficulty):
+        """Estimates Clean Sheet probability (0.0 to 1.0) using FDR."""
+        # my_team_difficulty: Proxy for My Defense Strength (High = Strong)
+        # opponent_difficulty: Proxy for Opponent Attack Strength (High = Strong)
 
-        # Sigmoid-like scaling
-        # 0 diff -> ~0.30 (30%)
-        # +200 diff -> ~0.50 (50%)
-        # -200 diff -> ~0.10 (10%)
+        diff = my_team_difficulty - opponent_difficulty
+        # Range: -4 to +4
 
         base_prob = 0.30
-        adjustment = diff * 0.001  # 100 diff = +0.10
+        adjustment = diff * 0.10
 
         prob = base_prob + adjustment
         return max(0.05, min(0.80, prob))
 
-    def _calculate_save_points(self, team_strength_d, opponent_strength_a):
-        """Estimates Save Points for GKs."""
-        # If Def is weak and Opp Att is strong, more saves.
-        diff = opponent_strength_a - team_strength_d
+    def _calculate_save_points(self, my_team_difficulty, opponent_difficulty):
+        """Estimates Save Points for GKs using FDR."""
+        # More saves if My Defense is Weak (Low) and Opponent Attack is Strong (High)
+        diff = opponent_difficulty - my_team_difficulty
 
-        if diff > 100:
+        if diff >= 2:
             return 1.0  # ~3 saves
         elif diff > 0:
             return 0.5  # ~1-2 saves
@@ -398,6 +426,7 @@ class FPLManager:
     def calculate_xp(self, player, teams, fixtures, history):
         total_xp = 0
         gw_points = {}
+        breakdowns = {}  # New: Store breakdown per GW
 
         # 1. Weighted Form & Minutes
         weighted_form = self._calculate_weighted_form(history)
@@ -457,11 +486,18 @@ class FPLManager:
             my_team = teams[player["team"]]
 
             # --- FIXTURE MODIFIERS ---
+            # difficulty = Opponent Strength (Difficulty for Me)
             difficulty = self.get_fixture_difficulty(f, player["team"], teams)
+
+            # my_team_difficulty = My Strength (Difficulty for Opponent)
+            my_team_difficulty = self.get_fixture_difficulty(f, opponent_id, teams)
+
             fixture_mult = self._calculate_fixture_multiplier(difficulty)
 
             # --- MATCHUP MODIFIERS ---
-            matchup_mult = self._calculate_matchup_multiplier(player, opponent, my_team)
+            matchup_mult = self._calculate_matchup_multiplier(
+                player, difficulty, my_team_difficulty
+            )
 
             # --- HOME ADVANTAGE ---
             venue_mult = 1.1 if is_home else 0.95
@@ -469,33 +505,63 @@ class FPLManager:
             # --- POSITIONAL LOGIC ---
 
             # A. Clean Sheet Probability
-            cs_prob = self._calculate_cs_probability(
-                my_team["strength_d"], opponent["strength_a"]
-            )
+            cs_prob = self._calculate_cs_probability(my_team_difficulty, difficulty)
             if is_home:
                 cs_prob += 0.05
 
             # B. Expected Points Calculation
             gw_xp = 0
 
+            # Breakdown components
+            breakdown = {
+                "opponent": opponent["name"],
+                "is_home": is_home,
+                "difficulty": difficulty,
+                "base_attack": round(base_attack_potential, 2),
+                "fixture_mult": round(fixture_mult, 2),
+                "matchup_mult": round(matchup_mult, 2),
+                "venue_mult": round(venue_mult, 2),
+                "cs_prob": round(cs_prob, 2),
+                "expected_mins": round(expected_minutes, 1),
+                "app_points": 0.0,
+                "save_points": 0.0,
+                "clean_sheet_points": 0.0,
+                "attack_points": 0.0,
+            }
+
             if USE_THREAT_MODEL:
                 # THREAT MODEL: Separate Appearance from Performance
                 gw_xp += expected_app_points  # Unscaled by difficulty
+                breakdown["app_points"] = expected_app_points
 
                 performance_xp = 0
                 if player["position"] == 1:  # GK
-                    performance_xp += cs_prob * 4.0
-                    performance_xp += self._calculate_save_points(
-                        my_team["strength_d"], opponent["strength_a"]
+                    cs_pts = cs_prob * 4.0
+                    save_pts = self._calculate_save_points(
+                        my_team_difficulty, difficulty
                     )
+                    performance_xp += cs_pts + save_pts
+                    breakdown["clean_sheet_points"] = round(cs_pts, 2)
+                    breakdown["save_points"] = round(save_pts, 2)
+
                 elif player["position"] == 2:  # DEF
-                    performance_xp += cs_prob * 4.0
-                    performance_xp += base_attack_potential * 0.1 * matchup_mult
+                    cs_pts = cs_prob * 4.0
+                    att_pts = base_attack_potential * 0.1 * matchup_mult
+                    performance_xp += cs_pts + att_pts
+                    breakdown["clean_sheet_points"] = round(cs_pts, 2)
+                    breakdown["attack_points"] = round(att_pts, 2)
+
                 elif player["position"] == 3:  # MID
-                    performance_xp += cs_prob * 1.0
-                    performance_xp += base_attack_potential * 0.8 * matchup_mult
+                    cs_pts = cs_prob * 1.0
+                    att_pts = base_attack_potential * 0.8 * matchup_mult
+                    performance_xp += cs_pts + att_pts
+                    breakdown["clean_sheet_points"] = round(cs_pts, 2)
+                    breakdown["attack_points"] = round(att_pts, 2)
+
                 elif player["position"] == 4:  # FWD
-                    performance_xp += base_attack_potential * 1.0 * matchup_mult
+                    att_pts = base_attack_potential * 1.0 * matchup_mult
+                    performance_xp += att_pts
+                    breakdown["attack_points"] = round(att_pts, 2)
 
                 # Apply multipliers to performance only
                 performance_xp *= fixture_mult * venue_mult
@@ -507,7 +573,7 @@ class FPLManager:
                 if player["position"] == 1:  # GK
                     step_xp += cs_prob * 4.0
                     step_xp += self._calculate_save_points(
-                        my_team["strength_d"], opponent["strength_a"]
+                        my_team_difficulty, difficulty
                     )
                 elif player["position"] == 2:  # DEF
                     step_xp += cs_prob * 4.0
@@ -524,22 +590,29 @@ class FPLManager:
             # --- SET PIECES ---
             if player["web_name"] in PENALTY_TAKERS:
                 gw_xp *= 1.15
+                breakdown["pen_bonus"] = 1.15
             if player["web_name"] in SET_PIECE_TAKERS:
                 gw_xp *= 1.05
+                breakdown["set_piece_bonus"] = 1.05
 
             # Adjust for availability (e.g. 75% flag)
             chance = player["chance_of_playing"]
             if pd.isna(chance):
                 chance = 100
             prob = chance / 100
+            breakdown["chance_of_playing"] = chance
 
             final_gw_xp = gw_xp * prob
             total_xp += final_gw_xp
 
+            breakdown["final_xp"] = round(final_gw_xp, 2)
+
             # Store per-GW points
             gw_event = f.get("event")
             if gw_event:
-                gw_points[f"GW{gw_event}"] = round(final_gw_xp, 2)
+                gw_key = f"GW{gw_event}"
+                gw_points[gw_key] = round(final_gw_xp, 2)
+                breakdowns[gw_key] = breakdown
 
             # Enrich fixture data for GUI
             f["opponent"] = (
@@ -547,7 +620,7 @@ class FPLManager:
             )
             f["xp"] = final_gw_xp
 
-        return total_xp, gw_points
+        return total_xp, gw_points, breakdowns
 
     def _calculate_cap_score(self, player, next_gw_xp, history):
         cap_score = next_gw_xp
@@ -726,7 +799,9 @@ class FPLManager:
             # Fetch full summary for history (minutes check)
             fixtures, history = self.get_player_summary(player["id"])
 
-            xp, gw_points = self.calculate_xp(player, teams_data, fixtures, history)
+            xp, gw_points, breakdowns = self.calculate_xp(
+                player, teams_data, fixtures, history
+            )
 
             # Next GW XP for captaincy
             next_gw_key = f"GW{next_event}"
@@ -746,6 +821,7 @@ class FPLManager:
             p_data["cap_score"] = cap_score
             p_data["upcoming_fixtures"] = fixtures[:NEXT_N_GW]
             p_data["total_xp"] = xp  # Store total 5GW XP for display
+            p_data["xp_breakdowns"] = breakdowns  # Store breakdowns
 
             # Add GW points
             for k, v in gw_points.items():

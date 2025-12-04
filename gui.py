@@ -601,7 +601,7 @@ class TransferFrame(BaseViewFrame):
                 try:
                     time.sleep(0.05)
                     fixtures, history = self.manager.get_player_summary(player["id"])
-                    xp, gw_points = self.manager.calculate_xp(
+                    xp, gw_points, breakdowns = self.manager.calculate_xp(
                         player, teams, fixtures, history
                     )
                     gw_str = ", ".join([f"{k}:{v}" for k, v in gw_points.items()])
@@ -1003,7 +1003,7 @@ class PlayerSearchDialog(tk.Toplevel):
             try:
                 time.sleep(0.05)
                 fixtures, history = self.manager.get_player_summary(player["id"])
-                xp, gw_points = self.manager.calculate_xp(
+                xp, gw_points, breakdowns = self.manager.calculate_xp(
                     player, teams, fixtures, history
                 )
                 gw_str = ", ".join([f"{k}:{v}" for k, v in gw_points.items()])
@@ -1134,6 +1134,9 @@ class DataFrame(OptimizerBaseFrame):
         self.tree.tag_configure("captain", foreground="#FFD700")  # Gold
         self.tree.tag_configure("vice", foreground="#C0C0C0")  # Silver
 
+        # Bind Double Click for Breakdown
+        self.tree.bind("<Double-1>", self.show_xp_breakdown)
+
     def update_view(self, data):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1190,6 +1193,172 @@ class DataFrame(OptimizerBaseFrame):
                 ),
                 tags=(row_tag,),
             )
+
+    def show_xp_breakdown(self, event):
+        selected = self.tree.selection()
+        if not selected:
+            return
+
+        player_id = int(selected[0])
+
+        # Find player data
+        player_data = None
+
+        # Check starters
+        for p in self.state["optimization_data"]["starters"]:
+            if p["id"] == player_id:
+                player_data = p
+                break
+
+        # Check bench if not found
+        if not player_data:
+            for p in self.state["optimization_data"]["bench"]:
+                if p["id"] == player_id:
+                    player_data = p
+                    break
+
+        if not player_data or "xp_breakdowns" not in player_data:
+            return
+
+        # Create Popup
+        popup = tk.Toplevel(self)
+        popup.title(f"xP Breakdown: {player_data['web_name']}")
+        popup.geometry("800x600")
+        popup.configure(bg=COLORS["bg"])
+
+        # Header
+        header = tk.Frame(popup, bg=COLORS["bg"], pady=10)
+        header.pack(fill=tk.X)
+
+        ttk.Label(
+            header,
+            text=f"{player_data['web_name']} - xP Breakdown",
+            style="Header.TLabel",
+        ).pack()
+
+        # Scrollable Frame for Breakdowns
+        canvas = tk.Canvas(popup, bg=COLORS["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(popup, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=COLORS["bg"])
+
+        scrollable_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=20, pady=20)
+        scrollbar.pack(side="right", fill="y")
+
+        # Display each GW breakdown
+        breakdowns = player_data["xp_breakdowns"]
+        sorted_gws = sorted(breakdowns.keys(), key=lambda x: int(x.replace("GW", "")))
+
+        for gw in sorted_gws:
+            bd = breakdowns[gw]
+
+            # GW Frame
+            gw_frame = tk.LabelFrame(
+                scrollable_frame,
+                text=f"{gw} vs {bd['opponent']} ({'H' if bd['is_home'] else 'A'})",
+                bg=COLORS["card_bg"],
+                fg=COLORS["text"],
+                font=FONTS["bold"],
+                padx=10,
+                pady=10,
+            )
+            gw_frame.pack(fill=tk.X, pady=10, padx=5)
+
+            # Grid Layout for Stats
+            # Row 0: Base Stats
+            self.row_stat(gw_frame, "Base Attack:", bd["base_attack"]).grid(
+                row=0, column=0, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Expected Mins:", bd["expected_mins"]).grid(
+                row=0, column=1, sticky="w", padx=10
+            )
+            self.row_stat(
+                gw_frame, "Chance Playing:", f"{bd['chance_of_playing']}%"
+            ).grid(row=0, column=2, sticky="w", padx=10)
+
+            # Row 1: Multipliers
+            self.row_stat(gw_frame, "Fixture Mult:", bd["fixture_mult"]).grid(
+                row=1, column=0, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Matchup Mult:", bd["matchup_mult"]).grid(
+                row=1, column=1, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Venue Mult:", bd["venue_mult"]).grid(
+                row=1, column=2, sticky="w", padx=10
+            )
+
+            # Row 2: Probabilities
+            self.row_stat(gw_frame, "Team CS Prob:", bd["cs_prob"]).grid(
+                row=2, column=0, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Difficulty:", bd["difficulty"]).grid(
+                row=2, column=1, sticky="w", padx=10
+            )
+
+            # Row 3: Points Contribution
+            tk.Label(
+                gw_frame,
+                text="Points Contribution:",
+                bg=COLORS["card_bg"],
+                fg=COLORS["accent"],
+                font=FONTS["bold"],
+            ).grid(row=3, column=0, sticky="w", pady=(10, 5))
+
+            self.row_stat(gw_frame, "Appearance:", bd["app_points"]).grid(
+                row=4, column=0, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Clean Sheet:", bd["clean_sheet_points"]).grid(
+                row=4, column=1, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Save Pts:", bd["save_points"]).grid(
+                row=4, column=2, sticky="w", padx=10
+            )
+            self.row_stat(gw_frame, "Attack Pts:", bd["attack_points"]).grid(
+                row=5, column=0, sticky="w", padx=10
+            )
+
+            if "pen_bonus" in bd:
+                self.row_stat(gw_frame, "Pen Bonus:", "x1.15").grid(
+                    row=5, column=1, sticky="w", padx=10
+                )
+            if "set_piece_bonus" in bd:
+                self.row_stat(gw_frame, "Set Piece:", "x1.05").grid(
+                    row=5, column=2, sticky="w", padx=10
+                )
+
+            # Total
+            total_lbl = tk.Label(
+                gw_frame,
+                text=f"Total xP: {bd['final_xp']}",
+                bg=COLORS["card_bg"],
+                fg=COLORS["success"],
+                font=("Segoe UI", 12, "bold"),
+            )
+            total_lbl.grid(row=6, column=2, sticky="e", pady=10)
+
+    def row_stat(self, parent, label, value):
+        f = tk.Frame(parent, bg=COLORS["card_bg"])
+        tk.Label(
+            f,
+            text=label,
+            bg=COLORS["card_bg"],
+            fg=COLORS["subtext"],
+            font=FONTS["small"],
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            f,
+            text=str(value),
+            bg=COLORS["card_bg"],
+            fg=COLORS["text"],
+            font=FONTS["bold"],
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        return f
 
     def on_transfer_click(self):
         selected = self.tree.selection()
@@ -1715,6 +1884,11 @@ class FDREditorDialog(tk.Toplevel):
         thread = threading.Thread(target=self.parent.load_data)
         thread.daemon = True
         thread.start()
+
+        # Trigger Global Optimization to update xP with new FDR
+        team_id = self.parent.controller.shared_state["team_id"].get()
+        if team_id:
+            self.parent.controller.run_global_optimization(team_id)
 
         self.destroy()
 
