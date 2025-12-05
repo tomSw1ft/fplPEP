@@ -24,6 +24,19 @@ class FPLManager:
         self.team_short_names = {}
         self.custom_fdr = self.load_custom_fdr()
 
+        # Cache
+        self.player_summary_cache = {}
+
+        # Model Configuration (Default Parameters)
+        self.model_config = {
+            "form_weights": [1.0, 0.9, 0.8, 0.7, 0.6],
+            "fixture_diff_factor": 0.05,
+            "home_boost": 1.05,
+            "away_penalty": 0.95,
+            "bonus_multiplier": 1.1,
+            "clean_sheet_base": 0.30,
+        }
+
     def load_custom_fdr(self):
         if os.path.exists(CUSTOM_FDR_FILE):
             try:
@@ -190,6 +203,23 @@ class FPLManager:
                 )
         return results
 
+    def get_player_summary(self, element_id):
+        """Fetches detailed summary for a specific player (fixtures, history)."""
+        if element_id in self.player_summary_cache:
+            return self.player_summary_cache[element_id]
+
+        url = f"{BASE_URL}element-summary/{element_id}/"
+        try:
+            data = self.get_json(url)
+            self.player_summary_cache[element_id] = (
+                data.get("fixtures", []),
+                data.get("history", []),
+            )
+            return self.player_summary_cache[element_id]
+        except Exception as e:
+            print(f"Error fetching summary for player {element_id}: {e}")
+            return [], []
+
     def get_team_details(self, team_id):
         """Fetches team entry details including bank."""
         return self.get_json(BASE_URL + f"entry/{team_id}/")
@@ -326,7 +356,8 @@ class FPLManager:
             return 5
 
     def _calculate_fixture_multiplier(self, difficulty):
-        return 1.0 + ((3 - difficulty) * 0.08)
+        factor = self.model_config.get("fixture_diff_factor", 0.08)
+        return 1.0 + ((3 - difficulty) * factor)
 
     def _calculate_matchup_multiplier(
         self, player, opponent_difficulty, my_team_difficulty
@@ -375,8 +406,8 @@ class FPLManager:
 
         # Use last 5 games
         recent = history[-5:]
-        # Weights: 1.0, 0.9, 0.8, 0.7, 0.6 (most recent first)
-        weights = [1.0, 0.9, 0.8, 0.7, 0.6]
+        # Weights (most recent first)
+        weights = self.model_config.get("form_weights", [1.0, 0.9, 0.8, 0.7, 0.6])
 
         total_weighted_pts = 0
         total_weights = 0
@@ -397,7 +428,7 @@ class FPLManager:
 
         # Use last 5 games
         recent = history[-5:]
-        weights = [1.0, 0.9, 0.8, 0.7, 0.6]
+        weights = self.model_config.get("form_weights", [1.0, 0.9, 0.8, 0.7, 0.6])
 
         total_weighted = 0
         total_weights = 0
@@ -424,7 +455,7 @@ class FPLManager:
         diff = my_team_difficulty - opponent_difficulty
         # Range: -4 to +4
 
-        base_prob = 0.30
+        base_prob = self.model_config.get("clean_sheet_base", 0.30)
         adjustment = diff * 0.10
 
         prob = base_prob + adjustment
@@ -478,7 +509,8 @@ class FPLManager:
 
             # Bonus Potential & Explosiveness
             # Boosted to 1.3 to account for BPS and high-performing variance
-            base_attack_potential = (xp_goals + xp_assists) * 1.3
+            bonus_mult = self.model_config.get("bonus_multiplier", 1.3)
+            base_attack_potential = (xp_goals + xp_assists) * bonus_mult
 
         else:
             # LEGACY MODEL: Based on Past Points
@@ -518,7 +550,9 @@ class FPLManager:
             )
 
             # --- HOME ADVANTAGE ---
-            venue_mult = 1.1 if is_home else 0.95
+            home_boost = self.model_config.get("home_boost", 1.1)
+            away_penalty = self.model_config.get("away_penalty", 0.95)
+            venue_mult = home_boost if is_home else away_penalty
 
             # --- POSITIONAL LOGIC ---
 
@@ -906,7 +940,118 @@ class FPLManager:
 
         return candidates, next_event
 
-    def get_player_summary(self, player_id):
-        """Returns (fixtures, history) for a player."""
-        data = self.get_json(BASE_URL + f"element-summary/{player_id}/")
-        return data["fixtures"], data["history"]
+    def get_model_performance(self, num_weeks=5, team_id=None):
+        """
+        Backtests the model for the last `num_weeks`.
+        Compares predicted points vs actual points for the *actual* squad used in those gameweeks.
+        """
+        static_data = self.get_bootstrap_static()
+        current_event = self.get_current_event_id()
+        teams_data = self.get_processed_teams()
+
+        # Identify relevant past gameweeks (finished)
+        completed_events = [
+            e
+            for e in static_data["events"]
+            if e["finished"] and e["id"] < current_event
+        ]
+        if not completed_events:
+            return []
+
+        target_events = sorted(completed_events, key=lambda x: x["id"], reverse=True)[
+            :num_weeks
+        ]
+        target_events.reverse()  # Sort Chronologically
+
+        results = []
+
+        for event in target_events:
+            gw = event["id"]
+            print(f"Analyzing GW{gw}...")
+
+            # 1. Get Squad for that Gameweek
+            # If team_id is provided, fetch actual picks.
+            if not team_id:
+                return []
+
+            try:
+                picks_data = self.get_team_picks(team_id, gw)
+                squad_ids = [p["element"] for p in picks_data["picks"]]
+                captain_id = next(
+                    (p["element"] for p in picks_data["picks"] if p["is_captain"]), None
+                )
+                # Handle Triple Captain? (active_chip == '3xc'). For simplicity, we ignore chips for now.
+            except Exception as e:
+                print(f"Error fetching picks for GW{gw}: {e}")
+                continue
+
+            # 2. Re-construct "Past State" for Players
+            gw_total_predicted = 0.0
+            gw_total_actual = 0.0
+
+            # Fetch all needed players
+            _, df_players = self.fetch_and_filter_data(
+                None, 999.0, include_ids=squad_ids
+            )
+
+            for _, player in df_players.iterrows():
+                fixtures, history = self.get_player_summary(player["id"])
+
+                # Split History
+                past_history = [h for h in history if h["round"] < gw]
+                actual_games = [h for h in history if h["round"] == gw]
+                actual_points = sum(h["total_points"] for h in actual_games)
+
+                # Fabricate "Upcoming Fixture" for Calculate XP
+                # Fabricate "Upcoming Fixture" for Calculate XP
+                mock_upcoming = []
+                for game in actual_games:
+                    is_home = game["was_home"]
+                    opponent_id = game["opponent_team"]
+
+                    # We need to lookup difficulty using get_fixture_difficulty
+                    # It requires a fixture object with 'team_h' and 'team_a'
+
+                    mock_fixture_for_calc = {
+                        "team_h": player["team"] if is_home else opponent_id,
+                        "team_a": opponent_id if is_home else player["team"],
+                    }
+
+                    teams_processed = self.get_processed_teams()
+                    difficulty = self.get_fixture_difficulty(
+                        mock_fixture_for_calc, player["team"], teams_processed
+                    )
+
+                    mock_fixture = {
+                        "event": game["round"],
+                        "difficulty": difficulty,
+                        "is_home": is_home,
+                        "team_h": mock_fixture_for_calc["team_h"],
+                        "team_a": mock_fixture_for_calc["team_a"],
+                    }
+                    mock_upcoming.append(mock_fixture)
+
+                # If player didn't play (no history entry), mock_upcoming is empty -> XP 0.
+
+                xp, _, _ = self.calculate_xp(
+                    player, teams_data, mock_upcoming, past_history
+                )
+
+                # Multiplier
+                multiplier = 1
+                if player["id"] == captain_id:
+                    multiplier = 2
+
+                gw_total_predicted += xp * multiplier
+                gw_total_actual += actual_points * multiplier
+
+            results.append(
+                {
+                    "gameweek": gw,
+                    "predicted": round(gw_total_predicted, 1),
+                    "actual": round(gw_total_actual, 0),
+                    "diff": round(gw_total_actual - gw_total_predicted, 1),
+                }
+            )
+
+        return results

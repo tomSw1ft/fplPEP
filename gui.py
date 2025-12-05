@@ -98,6 +98,10 @@ class FPLApp:
 
         self.manager = tool.FPLManager()
 
+        # Data Caching
+        self.model_perf_cache = None
+        self.model_perf_thread = None
+
         # Shared State for Optimizer
         self.shared_state = {
             "team_id": tk.StringVar(),
@@ -143,6 +147,9 @@ class FPLApp:
         self.root.deiconify()
 
     def run_global_optimization(self, team_id):
+        # Trigger background cache for Model Performance
+        self.trigger_model_performance_preload(team_id)
+
         self.shared_state["status"] = "loading"
         thread = threading.Thread(
             target=self._optimization_thread, args=(int(team_id),)
@@ -228,6 +235,26 @@ class FPLApp:
         except Exception as e:
             print(f"Optimization error: {e}")
             self.root.after(0, lambda err=str(e): self._optimization_error(err))
+
+    def trigger_model_performance_preload(self, team_id):
+        """Starts fetching model performance data in the background."""
+        if self.model_perf_cache is not None:
+            return  # Already cached
+
+        if self.model_perf_thread and self.model_perf_thread.is_alive():
+            return  # Already running
+
+        def fetch_task():
+            try:
+                # print("Preloading Model Performance Data...")
+                results = self.manager.get_model_performance(team_id=team_id)
+                self.model_perf_cache = results
+                # print("Model Performance Data Cached.")
+            except Exception as e:
+                print(f"Error preloading model perf: {e}")
+
+        self.model_perf_thread = threading.Thread(target=fetch_task, daemon=True)
+        self.model_perf_thread.start()
 
     def setup_styles(self):
         style = ttk.Style()
@@ -355,6 +382,9 @@ class FPLApp:
     def show_captaincy(self):
         self.show_view(CaptaincyFrame)
 
+    def show_model_performance(self):
+        self.show_view(ModelPerformanceFrame)
+
 
 class DashboardFrame(tk.Frame):
     def __init__(self, parent, controller):
@@ -402,6 +432,15 @@ class DashboardFrame(tk.Frame):
             "Compare top captain picks",
             self.controller.show_captaincy,
             1,
+            row=1,
+        )
+
+        self.create_card(
+            cards_frame,
+            "Model Performance",
+            "Backtest: Predicted vs Actual",
+            self.controller.show_model_performance,
+            2,
             row=1,
         )
 
@@ -1691,6 +1730,169 @@ class FDREditorDialog(tk.Toplevel):
             self.parent.controller.run_global_optimization(team_id)
 
         self.destroy()
+
+
+class ModelPerformanceFrame(BaseViewFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent, controller, "Model Performance")
+
+        # Main Content
+        self.content = tk.Frame(self, bg=COLORS["bg"], padx=20)
+        self.content.pack(fill=tk.BOTH, expand=True)
+
+        # Info
+        ttk.Label(
+            self.content,
+            text="Comparison of Model's Predicted Points vs Actual Points (Last 5 GWs)",
+            style="CardText.TLabel",
+        ).pack(anchor="w", pady=(0, 20))
+
+        # Table Container
+        self.table_frame = tk.Frame(self.content, bg=COLORS["card_bg"])
+        self.table_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.load_data()
+
+    def load_data(self):
+        # Check Cache First
+        if self.controller.model_perf_cache:
+            self.show_results(self.controller.model_perf_cache, None)
+            return
+
+        # Loading Indicator
+        lbl_loading = ttk.Label(
+            self.table_frame,
+            text="Calculating Model Performance (Backtesting)...",
+            style="CardText.TLabel",
+        )
+        lbl_loading.pack(pady=20)
+
+        # Check if pre-load thread is already running
+        if (
+            self.controller.model_perf_thread
+            and self.controller.model_perf_thread.is_alive()
+        ):
+            # Poll for completion
+            self.check_preload(lbl_loading)
+            return
+
+        def run_backtest():
+            try:
+                # Use team_id from app shared state
+                team_id_var = self.controller.shared_state.get("team_id")
+                team_id = team_id_var.get() if team_id_var else None
+
+                if not team_id:
+                    # Check if we have one in override file as fallback, or just fail
+                    try:
+                        with open("team_id.txt", "r") as f:
+                            team_id = f.read().strip()
+                    except:
+                        pass
+
+                results = self.controller.manager.get_model_performance(team_id=team_id)
+                # Cache it for next time
+                self.controller.model_perf_cache = results
+
+                self.controller.root.after(
+                    0, lambda: self.show_results(results, lbl_loading)
+                )
+            except Exception as e:
+                msg = str(e)
+                self.controller.root.after(0, lambda: self.show_error(msg, lbl_loading))
+
+        threading.Thread(target=run_backtest, daemon=True).start()
+
+    def check_preload(self, loader):
+        """Polls to see if the preload thread has finished."""
+        if self.controller.model_perf_cache:
+            self.show_results(self.controller.model_perf_cache, loader)
+        elif (
+            self.controller.model_perf_thread
+            and self.controller.model_perf_thread.is_alive()
+        ):
+            # Still running, check again in 500ms
+            self.after(500, lambda: self.check_preload(loader))
+        else:
+            # Thread died or finished without data? Restart/Fail
+            self.show_error("Preload failed or returned no data.", loader)
+
+    def show_results(self, results, loader):
+        if loader:
+            loader.destroy()
+
+        if not results:
+            ttk.Label(
+                self.table_frame, text="No model performance data available."
+            ).pack(pady=10)
+            return
+
+        # Table Headers
+        headers = ["Gameweek", "Predicted (xP)", "Actual Points", "Diff", "Accuracy %"]
+
+        # Grid setup
+        for col, h in enumerate(headers):
+            lbl = ttk.Label(
+                self.table_frame, text=h, style="CardTitle.TLabel", font=FONTS["bold"]
+            )
+            lbl.grid(row=0, column=col, padx=15, pady=10, sticky="w")
+
+        total_pred = 0
+        total_act = 0
+
+        # Rows
+        for i, row in enumerate(results, start=1):
+            total_pred += row["predicted"]
+            total_act += row["actual"]
+
+            # Accuracy: 1 - |diff| / actual (clamped)
+            if row["actual"] > 0:
+                acc = (1 - abs(row["diff"]) / row["actual"]) * 100
+            else:
+                acc = 0.0
+
+            values = [
+                f"GW{row['gameweek']}",
+                f"{row['predicted']:.1f}",
+                f"{row['actual']:.0f}",
+                f"{row['diff']:+.1f}",
+                f"{max(0, acc):.1f}%",
+            ]
+
+            for col, val in enumerate(values):
+                color = COLORS["text"]
+                if col == 3:  # Diff
+                    if row["diff"] > 10:
+                        color = "#FF5555"  # Overpredicted
+                    elif row["diff"] < -10:
+                        color = "#55FF55"  # Underpredicted (Good surprise)
+
+                ttk.Label(
+                    self.table_frame,
+                    text=val,
+                    style="CardText.TLabel",
+                    foreground=color,
+                ).grid(row=i, column=col, padx=15, pady=10, sticky="w")
+
+        # Summary Row
+        row_idx = len(results) + 2
+        ttk.Separator(self.table_frame, orient="horizontal").grid(
+            row=row_idx - 1, column=0, columnspan=5, sticky="ew", pady=10
+        )
+
+        ttk.Label(self.table_frame, text="Total", style="CardTitle.TLabel").grid(
+            row=row_idx, column=0, padx=15
+        )
+        ttk.Label(
+            self.table_frame, text=f"{total_pred:.1f}", style="CardTitle.TLabel"
+        ).grid(row=row_idx, column=1, padx=15)
+        ttk.Label(
+            self.table_frame, text=f"{total_act:.0f}", style="CardTitle.TLabel"
+        ).grid(row=row_idx, column=2, padx=15)
+
+    def show_error(self, msg, loader):
+        loader.destroy()
+        ttk.Label(self.table_frame, text=f"Error: {msg}", foreground="red").pack()
 
 
 class CaptaincyFrame(BaseViewFrame):

@@ -195,6 +195,143 @@ class TestFPLManager(unittest.TestCase):
         # MID4 has score 9.0 (5.0+4), FWD2 has 8.0 (6.0+2)
         self.assertEqual(cap["web_name"], "MID4")
 
+    @patch("tool.FPLManager.get_bootstrap_static")
+    @patch("tool.FPLManager.get_team_picks")
+    @patch("tool.FPLManager.fetch_and_filter_data")
+    @patch("tool.FPLManager.get_player_summary")
+    def test_get_model_performance(
+        self, mock_summary, mock_fetch, mock_picks, mock_static
+    ):
+        # Mock Context
+        mock_static.return_value = {
+            "events": [
+                {"id": 10, "finished": True, "is_current": False},
+                {"id": 11, "finished": True, "is_current": False},
+                {"id": 12, "is_current": True, "finished": False},
+            ],
+            "teams": [
+                {
+                    "id": 1,
+                    "name": "Team 1",
+                    "strength_defence_home": 1000,
+                    "strength_defence_away": 1000,
+                    "strength_attack_home": 1000,
+                    "strength_attack_away": 1000,
+                },
+                {
+                    "id": 4,
+                    "name": "Team 4",
+                    "strength_defence_home": 1000,
+                    "strength_defence_away": 1000,
+                    "strength_attack_home": 1000,
+                    "strength_attack_away": 1000,
+                },
+                {
+                    "id": 5,
+                    "name": "Team 5",
+                    "strength_defence_home": 1000,
+                    "strength_defence_away": 1000,
+                    "strength_attack_home": 1000,
+                    "strength_attack_away": 1000,
+                },
+            ],
+        }
+
+        # Mock Picks for GW11 (previous)
+        mock_picks.return_value = {
+            "picks": [
+                {"element": 1, "is_captain": False, "is_vice_captain": False},
+                {"element": 2, "is_captain": True, "is_vice_captain": False},
+            ]
+        }
+
+        # Mock Fetch Data (Squad)
+        mock_df = pd.DataFrame(
+            [
+                {
+                    "id": 1,
+                    "team": 1,
+                    "web_name": "P1",
+                    "position": 3,
+                    "chance_of_playing": 100,
+                    "points_per_game": "4.0",
+                    "form": "3.0",
+                },  # MID
+                {
+                    "id": 2,
+                    "team": 1,
+                    "web_name": "P2",
+                    "position": 4,
+                    "chance_of_playing": 100,
+                    "points_per_game": "5.0",
+                    "form": "4.0",
+                },  # FWD
+            ]
+        )
+        # Return mock teams and df
+        mock_fetch.return_value = ({}, mock_df)
+
+        # Mock Player 1 History
+        # GW11 game: 5 points
+        # History BEFORE GW11: some stats
+        mock_summary.side_effect = [
+            (  # Player 1
+                [],  # fixtures
+                [  # history
+                    {
+                        "round": 10,
+                        "total_points": 2,
+                        "was_home": True,
+                        "minutes": 90,
+                    },
+                    {
+                        "round": 11,
+                        "total_points": 5,
+                        "was_home": False,
+                        "opponent_team": 5,
+                        "minutes": 90,
+                    },
+                ],
+            ),
+            (  # Player 2 (Captain)
+                [],  # fixtures
+                [  # history
+                    {
+                        "round": 10,
+                        "total_points": 10,
+                        "was_home": True,
+                        "minutes": 90,
+                    },
+                    {
+                        "round": 11,
+                        "total_points": 8,
+                        "was_home": True,
+                        "opponent_team": 4,
+                        "minutes": 90,
+                    },
+                ],
+            ),
+        ]
+
+        # Run Backtest
+        results = self.manager.get_model_performance(num_weeks=1, team_id=123)
+
+        self.assertEqual(len(results), 1)
+        res = results[0]
+        self.assertEqual(res["gameweek"], 11)
+
+        # Actual Points Check:
+        # P1: 5 points
+        # P2: 8 points * 2 (Captain) = 16
+        # Total Actual = 21
+        self.assertEqual(res["actual"], 21)
+
+        # Predicted Points Check (Approx):
+        # Logic runs calculate_xp. We didn't mock calculate_xp, so it runs real logic using mocked data.
+        # It should return a float.
+        self.assertIsInstance(res["predicted"], float)
+        self.assertIsInstance(res["diff"], float)
+
 
 if __name__ == "__main__":
     unittest.main()
