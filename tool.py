@@ -96,6 +96,16 @@ class FPLManager:
                 return max(1, event["id"] - 1)
         return 1
 
+    def get_next_event_id(self):
+        """Efficiently retrieves the next event ID."""
+        data = self.get_bootstrap_static()
+        for event in data["events"]:
+            if event["is_next"]:
+                return event["id"]
+        # Fallback
+        current = self.get_current_event_id()
+        return current + 1
+
     def get_team_picks(self, team_id, event_id):
         url = BASE_URL + f"entry/{team_id}/event/{event_id}/picks/"
         return self.get_json(url)
@@ -122,56 +132,90 @@ class FPLManager:
         # Process Teams
         teams = self.get_processed_teams()
 
-        # PRE-PROCESS: Identify teams with a valid #1 Penalty Taker
-        teams_with_p1 = set()
-        for p in data["elements"]:
-            if p["penalties_order"] == 1:
-                teams_with_p1.add(p["team"])
+        # Identify teams with a valid #1 Penalty Taker for promotion logic
+        teams_with_p1 = {
+            p["team"] for p in data["elements"] if p["penalties_order"] == 1
+        }
 
-        # Process Players
-        players = []
-        for p in data["elements"]:
-            # Check if this player is in our mandatory include list
-            is_mandatory = include_ids and (p["id"] in include_ids)
+        # Convert to DataFrame immediately
+        df = pd.DataFrame(data["elements"])
 
-            # Role check: If role_id is None (ANY), we skip the type check
-            is_role_match = (role_id is None) or (p["element_type"] == role_id)
+        # Create mandatory set for fast lookup
+        include_ids_set = set(include_ids) if include_ids else set()
 
-            # Standard filters
-            passes_filters = (
-                is_role_match
-                and (p["now_cost"] / 10 <= max_budget)
-                and (p["status"] in ["a", "d"])
-                and (p["minutes"] > 200)
-            )
+        # Vectorized Filtering
+        # 1. Mandatory Candidates (Always keep)
+        mandatory_mask = df["id"].isin(include_ids_set)
 
-            if is_mandatory or passes_filters:
-                players.append(
-                    {
-                        "id": p["id"],
-                        "web_name": p["web_name"],
-                        "team": p["team"],
-                        "position": p["element_type"],
-                        "form": float(p["form"]),
-                        "points_per_game": float(p["points_per_game"]),
-                        "now_cost": p["now_cost"] / 10,
-                        "chance_of_playing": p["chance_of_playing_next_round"],
-                        "selected_by_percent": float(p["selected_by_percent"]),
-                        "status": p["status"],
-                        # FALLBACK: If team needs a taker and this is the #2, promote them
-                        "penalties_order": 1
-                        if (
-                            p["penalties_order"] == 2 and p["team"] not in teams_with_p1
-                        )
-                        else p["penalties_order"],
-                        "direct_freekicks_order": p["direct_freekicks_order"],
-                        "corners_and_indirect_freekicks_order": p[
-                            "corners_and_indirect_freekicks_order"
-                        ],
-                    }
-                )
+        # 2. Standard Candidates (Apply filters)
+        # Check Role (if role_id is provided)
+        if role_id is not None:
+            role_mask = df["element_type"] == role_id
+        else:
+            role_mask = pd.Series(True, index=df.index)
 
-        return teams, pd.DataFrame(players)
+        # Check Budget, Status, Minutes
+        standard_mask = (
+            role_mask
+            & ((df["now_cost"] / 10) <= max_budget)
+            & (df["status"].isin(["a", "d"]))
+            & (df["minutes"] > 200)
+        )
+
+        # Combine
+        final_mask = mandatory_mask | standard_mask
+        filtered_df = df[final_mask].copy()
+
+        if filtered_df.empty:
+            return (
+                teams,
+                pd.DataFrame(),
+            )  # Return empty DF with correct columns if needed?
+
+        # Vectorized Renaming and Calculations
+        filtered_df["now_cost"] = filtered_df["now_cost"] / 10
+        filtered_df["position"] = filtered_df["element_type"]
+
+        # Penalty Order Logic (Apply Fallback)
+        # If order is 2 and team has no #1, promote to 1
+        # Helper function for apply (vectorizing conditional logic involving set lookups is tricky but apply is fine here)
+        def adjust_penalties(row):
+            if row["penalties_order"] == 2 and row["team"] not in teams_with_p1:
+                return 1
+            return row["penalties_order"]
+
+        filtered_df["penalties_order"] = filtered_df.apply(adjust_penalties, axis=1)
+
+        # Select and Rename Columns
+        cols_to_keep = {
+            "id": "id",
+            "web_name": "web_name",
+            "team": "team",
+            "position": "position",
+            "form": "form",
+            "points_per_game": "points_per_game",
+            "now_cost": "now_cost",
+            "chance_of_playing_next_round": "chance_of_playing",
+            "selected_by_percent": "selected_by_percent",
+            "status": "status",
+            "penalties_order": "penalties_order",
+            "direct_freekicks_order": "direct_freekicks_order",
+            "corners_and_indirect_freekicks_order": "corners_and_indirect_freekicks_order",
+        }
+
+        # Ensure type strictness for numeric cols
+        filtered_df["form"] = pd.to_numeric(filtered_df["form"])
+        filtered_df["points_per_game"] = pd.to_numeric(filtered_df["points_per_game"])
+        filtered_df["selected_by_percent"] = pd.to_numeric(
+            filtered_df["selected_by_percent"]
+        )
+
+        # Final subset
+        result_df = filtered_df.rename(columns=cols_to_keep)[
+            list(cols_to_keep.values())
+        ]
+
+        return teams, result_df
 
     def search_player(self, query):
         """Searches for players by name."""
@@ -533,7 +577,7 @@ class FPLManager:
                 continue
 
             opponent = teams[opponent_id]
-            my_team = teams[player["team"]]
+            # my_team = teams[player["team"]] # Unused
 
             # --- FIXTURE MODIFIERS ---
             # difficulty = Opponent Strength (Difficulty for Me)
@@ -821,18 +865,8 @@ class FPLManager:
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Calculates XP and stats for a list of players for the next gameweek."""
         # 1. Get Context
-        event_id = self.get_current_event_id()
-
-        # Re-fetching bootstrap to get 'next' event specifically for planning
-        static_data = self.get_bootstrap_static()
-        next_event = None
-        for event in static_data["events"]:
-            if event["is_next"]:
-                next_event = event["id"]
-                break
-
-        if not next_event:
-            next_event = event_id + 1
+        # event_id = self.get_current_event_id() # Not needed for next event stats
+        next_event = self.get_next_event_id()
 
         print(f"Planning for Gameweek {next_event}...")
 
@@ -875,16 +909,6 @@ class FPLManager:
             p_data["cap_score"] = cap_score
             p_data["upcoming_fixtures"] = fixtures[:NEXT_N_GW]
 
-            # Format next fixture for display
-            if fixtures:
-                f = fixtures[0]
-                opp_name = teams_data[f["team_a"] if f["is_home"] else f["team_h"]][
-                    "name"
-                ]
-                p_data["next_fixture"] = f"{opp_name} ({'H' if f['is_home'] else 'A'})"
-                p_data["team_name"] = teams_data[player["team"]]["name"]
-
-            p_data["total_xp"] = xp  # Store total 5GW XP for display
             p_data["xp_breakdowns"] = breakdowns  # Store breakdowns
 
             # Add GW points

@@ -1787,7 +1787,7 @@ class ModelPerformanceFrame(BaseViewFrame):
                     try:
                         with open("team_id.txt", "r") as f:
                             team_id = f.read().strip()
-                    except:
+                    except (FileNotFoundError, IOError):
                         pass
 
                 results = self.controller.manager.get_model_performance(team_id=team_id)
