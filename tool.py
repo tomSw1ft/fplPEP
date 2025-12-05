@@ -12,31 +12,6 @@ BASE_URL = "https://fantasy.premierleague.com/api/"
 CUSTOM_FDR_FILE = "custom_fdr.json"
 
 # --- CONSTANTS ---
-# Players who are primary penalty takers (approximate list, update as needed)
-PENALTY_TAKERS = [
-    "Haaland",
-    "Salah",
-    "Palmer",
-    "Saka",
-    "Fernandes",
-    "Isak",
-    "Mbeumo",
-    "Solanke",
-    "Watkins",
-]
-
-# Players who take corners/free kicks
-SET_PIECE_TAKERS = [
-    "Alexander-Arnold",
-    "De Bruyne",
-    "Fernandes",
-    "Saka",
-    "Rice",
-    "Eze",
-    "Maddison",
-    "Bowen",
-    "Gordon",
-]
 
 
 class FPLManager:
@@ -134,12 +109,15 @@ class FPLManager:
         # Process Teams
         teams = self.get_processed_teams()
 
+        # PRE-PROCESS: Identify teams with a valid #1 Penalty Taker
+        teams_with_p1 = set()
+        for p in data["elements"]:
+            if p["penalties_order"] == 1:
+                teams_with_p1.add(p["team"])
+
         # Process Players
         players = []
         for p in data["elements"]:
-            # FILTER: Status 'a' (Available) or 'd' (Doubtful - 75%), Role match, and Budget match
-            # We strictly exclude 'i' (Injured) and 's' (Suspended) unless in include_ids
-
             # Check if this player is in our mandatory include list
             is_mandatory = include_ids and (p["id"] in include_ids)
 
@@ -167,10 +145,50 @@ class FPLManager:
                         "chance_of_playing": p["chance_of_playing_next_round"],
                         "selected_by_percent": float(p["selected_by_percent"]),
                         "status": p["status"],
+                        # FALLBACK: If team needs a taker and this is the #2, promote them
+                        "penalties_order": 1
+                        if (
+                            p["penalties_order"] == 2 and p["team"] not in teams_with_p1
+                        )
+                        else p["penalties_order"],
+                        "direct_freekicks_order": p["direct_freekicks_order"],
+                        "corners_and_indirect_freekicks_order": p[
+                            "corners_and_indirect_freekicks_order"
+                        ],
                     }
                 )
 
         return teams, pd.DataFrame(players)
+
+    def search_player(self, query):
+        """Searches for players by name."""
+        data = self.get_bootstrap_static()
+        query = query.lower()
+        results = []
+
+        for p in data["elements"]:
+            full_name = f"{p['first_name']} {p['second_name']}".lower()
+            if query in p["web_name"].lower() or query in full_name:
+                results.append(
+                    {
+                        "id": p["id"],
+                        "web_name": p["web_name"],
+                        "team": p["team"],
+                        "position": p["element_type"],
+                        "form": float(p["form"]),
+                        "points_per_game": float(p["points_per_game"]),
+                        "now_cost": p["now_cost"] / 10,
+                        "chance_of_playing": p["chance_of_playing_next_round"],
+                        "selected_by_percent": float(p["selected_by_percent"]),
+                        "status": p["status"],
+                        "penalties_order": p["penalties_order"],
+                        "direct_freekicks_order": p["direct_freekicks_order"],
+                        "corners_and_indirect_freekicks_order": p[
+                            "corners_and_indirect_freekicks_order"
+                        ],
+                    }
+                )
+        return results
 
     def get_team_details(self, team_id):
         """Fetches team entry details including bank."""
@@ -588,10 +606,15 @@ class FPLManager:
                 gw_xp += step_xp
 
             # --- SET PIECES ---
-            if player["web_name"] in PENALTY_TAKERS:
+            # --- SET PIECES ---
+            if player.get("penalties_order") == 1:
                 gw_xp *= 1.15
                 breakdown["pen_bonus"] = 1.15
-            if player["web_name"] in SET_PIECE_TAKERS:
+
+            if (
+                player.get("direct_freekicks_order") == 1
+                or player.get("corners_and_indirect_freekicks_order") == 1
+            ):
                 gw_xp *= 1.05
                 breakdown["set_piece_bonus"] = 1.05
 
@@ -759,16 +782,10 @@ class FPLManager:
         # 4. Optimize
         return self.optimize_specific_squad(my_player_ids)
 
-    def optimize_specific_squad(
+    def calculate_squad_stats(
         self, my_player_ids: List[int]
-    ) -> Tuple[
-        List[Dict[str, Any]],
-        List[Dict[str, Any]],
-        Optional[Dict[str, Any]],
-        Optional[Dict[str, Any]],
-        int,
-    ]:
-        """Optimizes the lineup for a specific list of player IDs."""
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Calculates XP and stats for a list of players for the next gameweek."""
         # 1. Get Context
         event_id = self.get_current_event_id()
 
@@ -790,10 +807,13 @@ class FPLManager:
             None, 999.0, include_ids=my_player_ids
         )
 
+        if df_all_players.empty:
+            return [], next_event
+
         # Filter for my players
         my_squad = df_all_players[df_all_players["id"].isin(my_player_ids)].copy()
 
-        # 4. Calculate XP and Captaincy Score for all 15
+        # 4. Calculate XP and Captaincy Score for all
         squad_xp = []
         for _, player in my_squad.iterrows():
             # Fetch full summary for history (minutes check)
@@ -820,6 +840,16 @@ class FPLManager:
             p_data["xp"] = next_gw_xp
             p_data["cap_score"] = cap_score
             p_data["upcoming_fixtures"] = fixtures[:NEXT_N_GW]
+
+            # Format next fixture for display
+            if fixtures:
+                f = fixtures[0]
+                opp_name = teams_data[f["team_a"] if f["is_home"] else f["team_h"]][
+                    "name"
+                ]
+                p_data["next_fixture"] = f"{opp_name} ({'H' if f['is_home'] else 'A'})"
+                p_data["team_name"] = teams_data[player["team"]]["name"]
+
             p_data["total_xp"] = xp  # Store total 5GW XP for display
             p_data["xp_breakdowns"] = breakdowns  # Store breakdowns
 
@@ -829,9 +859,52 @@ class FPLManager:
 
             squad_xp.append(p_data)
 
+        return squad_xp, next_event
+
+    def optimize_specific_squad(
+        self, my_player_ids: List[int]
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+        Optional[Dict[str, Any]],
+        int,
+    ]:
+        """Optimizes the lineup for a specific list of player IDs."""
+        squad_xp, next_event = self.calculate_squad_stats(my_player_ids)
         starters, bench, captain, vice_captain = self._optimize_lineup(squad_xp)
 
         return starters, bench, captain, vice_captain, next_event
+
+    def get_captaincy_candidates(self, team_id):
+        """Returns sorted list of captaincy candidates for a team."""
+        # 1. Get current event to fetch *current* squad
+        event_id = self.get_current_event_id()
+
+        # 2. Fetch picks
+        picks_data = self.get_team_picks(team_id, event_id)
+        my_player_ids = [p["element"] for p in picks_data["picks"]]
+
+        # 3. Calculate Stats
+        squad_xp, next_event = self.calculate_squad_stats(my_player_ids)
+
+        # 4. Sort by Cap Score
+        # Filter for valid captains (playing etc) - usually everyone is valid but let's just sort
+        candidates = sorted(squad_xp, key=lambda x: x["cap_score"], reverse=True)
+
+        # Map 'web_name' to 'name' for GUI consistency if needed,
+        # but GUI uses 'name' which comes from 'web_name' usually in my dict construction?
+        # In fetch_and_filter_data: "web_name": p["web_name"]
+        # But in optimize_specific_squad => p_data = player.to_dict() => keys are what dataframe has.
+        # Dataframe has "web_name".
+        # GUI CaptaincyFrame uses: p["name"]
+        # So I need to ensure "name" key exists.
+
+        for p in candidates:
+            p["name"] = p["web_name"]
+            p["team"] = p.get("team_name", "?")
+
+        return candidates, next_event
 
     def get_player_summary(self, player_id):
         """Returns (fixtures, history) for a player."""

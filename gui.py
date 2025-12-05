@@ -346,14 +346,8 @@ class FPLApp:
     def show_transfer_hub(self):
         self.show_view(TransferFrame)
 
-    def show_tactics_board(self):
-        self.show_view(FormationFrame)
-
     def show_data_hub(self):
         self.show_view(DataFrame)
-
-    def show_planner(self):
-        self.show_view(PlannerFrame)
 
     def show_fdr(self):
         self.show_view(FDRFrame)
@@ -388,33 +382,18 @@ class DashboardFrame(tk.Frame):
         )
         self.create_card(
             cards_frame,
-            "Tactics Board",
-            "Visualize your team formation",
-            self.controller.show_tactics_board,
-            1,
-        )
-        self.create_card(
-            cards_frame,
             "Data Hub",
             "Detailed statistical analysis",
             self.controller.show_data_hub,
-            2,
+            1,
         )
 
-        self.create_card(
-            cards_frame,
-            "FPL Planner",
-            "View upcoming fixtures for your squad",
-            self.controller.show_planner,
-            0,
-            row=1,
-        )
         self.create_card(
             cards_frame,
             "FDR Grid",
             "Fixture Difficulty Rating for all teams",
             self.controller.show_fdr,
-            1,
+            0,
             row=1,
         )
         self.create_card(
@@ -422,7 +401,7 @@ class DashboardFrame(tk.Frame):
             "Captaincy",
             "Compare top captain picks",
             self.controller.show_captaincy,
-            2,
+            1,
             row=1,
         )
 
@@ -720,108 +699,6 @@ class OptimizerBaseFrame(BaseViewFrame):
 
     def update_view(self, data):
         pass  # To be implemented by subclasses
-
-
-class FormationFrame(OptimizerBaseFrame):
-    def __init__(self, parent, controller):
-        super().__init__(parent, controller, "Tactics Board")
-
-        # Canvas
-        self.pitch_canvas = tk.Canvas(self, bg=COLORS["success"], highlightthickness=0)
-        self.pitch_canvas.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-
-        # Load Image
-        try:
-            original_img = tk.PhotoImage(file="head.png")
-            self.player_img = original_img.subsample(25, 25)
-        except Exception as e:
-            print(f"Error loading head.png: {e}")
-            self.player_img = None
-
-        self.check_initial_state()
-
-        # Bind Resize
-        self.pitch_canvas.bind("<Configure>", self.on_resize)
-
-    def on_resize(self, event):
-        if self.state["optimization_data"]:
-            self.draw_pitch(self.state["optimization_data"])
-
-    def update_view(self, data):
-        self.draw_pitch(data)
-
-    def draw_pitch(self, data):
-        self.pitch_canvas.delete("all")
-        w = self.pitch_canvas.winfo_width()
-        h = self.pitch_canvas.winfo_height()
-        if w < 100:
-            w = 800
-        if h < 100:
-            h = 600
-
-        # Draw Pitch Lines
-        self.pitch_canvas.create_line(0, h * 0.8, w, h * 0.8, fill="white", width=2)
-        self.pitch_canvas.create_text(
-            w / 2, h * 0.82, text="BENCH", fill="white", font=FONTS["bold"]
-        )
-
-        # Group Starters
-        gks = [p for p in data["starters"] if p["position"] == 1]
-        defs = [p for p in data["starters"] if p["position"] == 2]
-        mids = [p for p in data["starters"] if p["position"] == 3]
-        fwds = [p for p in data["starters"] if p["position"] == 4]
-
-        y_gk = h * 0.1
-        y_def = h * 0.28
-        y_mid = h * 0.48
-        y_fwd = h * 0.68
-        y_bench = h * 0.9
-
-        self.draw_line(gks, y_gk, w, data)
-        self.draw_line(defs, y_def, w, data)
-        self.draw_line(mids, y_mid, w, data)
-        self.draw_line(fwds, y_fwd, w, data)
-        self.draw_line(data["bench"], y_bench, w, data)
-
-    def draw_line(self, players, y, width, data):
-        n = len(players)
-        if n == 0:
-            return
-        gap = width / (n + 1)
-        for i, p in enumerate(players):
-            x = gap * (i + 1)
-            self.draw_player(x, y, p, data)
-
-    def draw_player(self, x, y, p, data):
-        if self.player_img:
-            self.pitch_canvas.create_image(
-                x, y, image=self.player_img, anchor=tk.CENTER
-            )
-        else:
-            self.pitch_canvas.create_oval(
-                x - 15, y - 15, x + 15, y + 15, fill="white", outline="black"
-            )
-
-        self.pitch_canvas.create_text(
-            x, y + 25, text=p["web_name"], fill="white", font=FONTS["bold"]
-        )
-        fixture_text = p.get("next_fixture", "-")
-        self.pitch_canvas.create_text(
-            x, y + 37, text=fixture_text, fill="#e0e0e0", font=FONTS["small"]
-        )
-        gw_xp_text = f"GW: {round(p['xp'], 1)}"
-        self.pitch_canvas.create_text(
-            x, y + 47, text=gw_xp_text, fill="#dddddd", font=FONTS["small"]
-        )
-
-        if p["id"] == data["captain"]["id"]:
-            self.pitch_canvas.create_text(
-                x + 20, y - 20, text="C", fill="yellow", font=("Segoe UI", 12, "bold")
-            )
-        elif p["id"] == data["vice_captain"]["id"]:
-            self.pitch_canvas.create_text(
-                x + 20, y - 20, text="V", fill="#cccccc", font=("Segoe UI", 10, "bold")
-            )
 
 
 class PlayerSearchDialog(tk.Toplevel):
@@ -1448,83 +1325,6 @@ class DataFrame(OptimizerBaseFrame):
 
     def get_pos_name(self, pos_id):
         return {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}.get(pos_id, "?")
-
-
-class PlannerFrame(OptimizerBaseFrame):
-    def __init__(self, parent, controller):
-        super().__init__(parent, controller, "FPL Planner")
-
-        # Grid Container
-        self.grid_frame = tk.Frame(self, bg=COLORS["bg"])
-        self.grid_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-
-        self.check_initial_state()
-
-    def update_view(self, data):
-        for widget in self.grid_frame.winfo_children():
-            widget.destroy()
-
-        # Headers
-        headers = ["Player", "Pos"] + [f"GW{data['next_event'] + i}" for i in range(5)]
-        for col, text in enumerate(headers):
-            lbl = ttk.Label(
-                self.grid_frame, text=text, style="CardTitle.TLabel", font=FONTS["bold"]
-            )
-            lbl.grid(row=0, column=col, padx=5, pady=10, sticky="w")
-
-        # Rows
-        all_players = data["starters"] + data["bench"]
-        all_players.sort(key=lambda x: x["position"])
-
-        for row_idx, p in enumerate(all_players, start=1):
-            # Name
-            ttk.Label(self.grid_frame, text=p["name"], style="CardText.TLabel").grid(
-                row=row_idx, column=0, padx=5, pady=5, sticky="w"
-            )
-            # Pos
-            pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-            ttk.Label(
-                self.grid_frame, text=pos_map[p["position"]], style="CardText.TLabel"
-            ).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-
-            # Fixtures
-            fixtures = p.get("upcoming_fixtures", [])
-            for i in range(5):
-                if i < len(fixtures):
-                    f = fixtures[i]
-                    # Color code based on difficulty (using XP as proxy for now, or just difficulty if we had it directly)
-                    # We have XP. Low XP = Hard, High XP = Easy.
-                    # Let's use a simple heuristic for color:
-                    # We don't have raw difficulty in the 'upcoming_fixtures' dict in tool.py yet, only XP.
-                    # But XP is better!
-
-                    bg_color = COLORS["card_bg"]
-                    fg_color = COLORS["text"]
-
-                    # Simple XP heat map
-                    if f["xp"] >= 6.0:
-                        bg_color = COLORS["success"]  # Green
-                    elif f["xp"] >= 4.0:
-                        bg_color = "#88AA00"  # Light Green
-                    elif f["xp"] >= 3.0:
-                        bg_color = "#AAAA00"  # Yellowish
-                    elif f["xp"] < 2.0:
-                        bg_color = "#AA3333"  # Red
-
-                    lbl = tk.Label(
-                        self.grid_frame,
-                        text=f"{f['opponent']}\n{round(f['xp'], 1)}",
-                        bg=bg_color,
-                        fg=fg_color,
-                        width=10,
-                        height=2,
-                        font=FONTS["small"],
-                    )
-                    lbl.grid(row=row_idx, column=2 + i, padx=2, pady=2)
-                else:
-                    ttk.Label(self.grid_frame, text="-", style="CardText.TLabel").grid(
-                        row=row_idx, column=2 + i, padx=5, pady=5
-                    )
 
 
 class FDRFrame(BaseViewFrame):
