@@ -8,10 +8,15 @@ An advanced Fantasy Premier League (FPL) companion application designed to help 
 - **Team Optimization**: Automatically selects your best starting XI, captain, and vice-captain based on predicted points (XP) and fixture difficulty.
 - **Tactics Board**: Visualizes your team formation on a pitch view, showing the fixture and predicted points for the gameweek.
 - **Transfer Hub**: Analyze the transfer market to find the best replacements by role (GK, DEF, MID, FWD) and budget.
-- **Data Hub**: Deep dive into player statistics.
+- **Data Hub**: Deep dive into player statistics, now extended to allow for a multi-week plan.
 - **Model Performance**: Compare the model's predicted points against actual results for the last 5 gameweeks to verify accuracy.
 - **Fixture Difficulty (FDR)**: View, and edit according to your preference, upcoming fixture difficulty ratings to plan ahead.
 - **Smart Login**: Supports automatic login via Team ID override.
+
+## Future Features
+
+- **Chip Strategy Helper**: Optimises chip strategy for the user.
+- **Real-time Injury Updates**: Move away from FPL "Flags" for player availability.
 
 ## Installation
 
@@ -31,23 +36,11 @@ An advanced Fantasy Premier League (FPL) companion application designed to help 
 2.  Enter your **Team ID** when prompted.
     - **Auto-Login**: You can create a `team_id.txt` file in the project root containing your Team ID to skip the login prompt on startup.
 
-### Parameter Tuning
-
-To optimize the prediction model for your specific team and league context, you can run the tuning script:
-
-```bash
-python tune_parameters.py
-```
-
-This script runs a grid search over key model parameters (Fixture Diff Factor, Bonus Multiplier, Home Boost) and reports the configuration that minimizes error.
-
 ## Project Structure
 
 - `gui.py`: The main application entry point and GUI implementation using Tkinter.
 - `tool.py`: Core logic for data fetching, XP calculation, and optimization algorithms.
-- `tune_parameters.py`: Script for backtesting and grid-search optimization of model parameters.
 - `custom_fdr.json`: Configuration file for custom fixture difficulty ratings.
-- `head.png`: Asset used for the player icons in the visual pitch view.
 
 ---
 

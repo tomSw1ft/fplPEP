@@ -861,12 +861,15 @@ class FPLManager:
         return self.optimize_specific_squad(my_player_ids)
 
     def calculate_squad_stats(
-        self, my_player_ids: List[int]
+        self, my_player_ids: List[int], target_event: int = None
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Calculates XP and stats for a list of players for the next gameweek."""
         # 1. Get Context
         # event_id = self.get_current_event_id() # Not needed for next event stats
-        next_event = self.get_next_event_id()
+        if target_event:
+            next_event = target_event
+        else:
+            next_event = self.get_next_event_id()
 
         print(f"Planning for Gameweek {next_event}...")
 
@@ -882,13 +885,17 @@ class FPLManager:
         my_squad = df_all_players[df_all_players["id"].isin(my_player_ids)].copy()
 
         # 4. Calculate XP and Captaincy Score for all
+        # 4. Calculate XP and Captaincy Score for all
         squad_xp = []
         for _, player in my_squad.iterrows():
             # Fetch full summary for history (minutes check)
             fixtures, history = self.get_player_summary(player["id"])
 
+            # FILTER FIXTURES: Start from next_event (Target GW)
+            relevant_fixtures = [f for f in fixtures if f.get("event", 0) >= next_event]
+
             xp, gw_points, breakdowns = self.calculate_xp(
-                player, teams_data, fixtures, history
+                player, teams_data, relevant_fixtures, history
             )
 
             # Next GW XP for captaincy
@@ -906,8 +913,9 @@ class FPLManager:
             # CRITICAL FIX: Optimization uses "xp" key for sorting.
             # We want to optimize for the NEXT GAMEWEEK, not the total 5GW.
             p_data["xp"] = next_gw_xp
+            p_data["total_xp"] = xp  # Store Total XP for 5GW
             p_data["cap_score"] = cap_score
-            p_data["upcoming_fixtures"] = fixtures[:NEXT_N_GW]
+            p_data["upcoming_fixtures"] = relevant_fixtures[:NEXT_N_GW]
 
             p_data["xp_breakdowns"] = breakdowns  # Store breakdowns
 
@@ -920,7 +928,7 @@ class FPLManager:
         return squad_xp, next_event
 
     def optimize_specific_squad(
-        self, my_player_ids: List[int]
+        self, my_player_ids: List[int], target_event: int = None
     ) -> Tuple[
         List[Dict[str, Any]],
         List[Dict[str, Any]],
@@ -929,7 +937,7 @@ class FPLManager:
         int,
     ]:
         """Optimizes the lineup for a specific list of player IDs."""
-        squad_xp, next_event = self.calculate_squad_stats(my_player_ids)
+        squad_xp, next_event = self.calculate_squad_stats(my_player_ids, target_event)
         starters, bench, captain, vice_captain = self._optimize_lineup(squad_xp)
 
         return starters, bench, captain, vice_captain, next_event

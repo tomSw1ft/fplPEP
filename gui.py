@@ -107,9 +107,12 @@ class FPLApp:
             "team_id": tk.StringVar(),
             "optimization_data": None,
             "current_squad_ids": [],
+            "initial_squad_ids": [],
+            "transfer_plan": {},  # { event_id: [ (out_id, in_id, price_change) ] }
             "current_squad_data": {},
             "status": "idle",
             "bank": 0.0,
+            "initial_bank": 0.0,
             "history": [],
         }
 
@@ -164,6 +167,10 @@ class FPLApp:
             )
 
             self.shared_state["current_squad_ids"] = [p["id"] for p in starters + bench]
+            if not self.shared_state["initial_squad_ids"]:
+                self.shared_state["initial_squad_ids"] = list(
+                    self.shared_state["current_squad_ids"]
+                )
             self.shared_state["current_squad_data"] = {
                 p["id"]: p for p in starters + bench
             }
@@ -182,6 +189,8 @@ class FPLApp:
                 team_details = self.manager.get_team_details(team_id)
                 bank = team_details.get("last_deadline_bank", 0) / 10.0
                 self.shared_state["bank"] = bank
+                if self.shared_state["initial_bank"] == 0.0:
+                    self.shared_state["initial_bank"] = bank
             except Exception as e:
                 print(f"Error fetching team details: {e}")
 
@@ -211,10 +220,18 @@ class FPLApp:
         thread.daemon = True
         thread.start()
 
-    def _optimization_thread_custom(self, player_ids):
+    def run_optimization_for_gw(self, player_ids, target_event):
+        self.shared_state["status"] = "loading"
+        thread = threading.Thread(
+            target=self._optimization_thread_custom, args=(player_ids, target_event)
+        )
+        thread.daemon = True
+        thread.start()
+
+    def _optimization_thread_custom(self, player_ids, target_event=None):
         try:
             starters, bench, captain, vice_captain, next_event = (
-                self.manager.optimize_specific_squad(player_ids)
+                self.manager.optimize_specific_squad(player_ids, target_event)
             )
 
             self.shared_state["current_squad_ids"] = [p["id"] for p in starters + bench]
@@ -995,8 +1012,30 @@ class DataFrame(OptimizerBaseFrame):
     """Displays detailed player statistics and allows for transfer simulation."""
 
     def __init__(self, parent: tk.Widget, controller: Any):
-        super().__init__(parent, controller, "Data Hub")
+        super().__init__(parent, controller, "Data Hub & Planner")
 
+        # Top Controls: Gameweek Selector
+        top_controls = tk.Frame(self.input_frame, bg=COLORS["card_bg"])
+        top_controls.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(top_controls, text="Planning GW:", style="CardText.TLabel").pack(
+            side=tk.LEFT, padx=5
+        )
+
+        self.current_next_gw = self.manager.get_next_event_id()
+        self.gw_var = tk.StringVar()
+        self.gw_combo = ttk.Combobox(
+            top_controls, textvariable=self.gw_var, state="readonly", width=15
+        )
+        self.gw_combo.pack(side=tk.LEFT, padx=5)
+        self.gw_combo.bind("<<ComboboxSelected>>", self.on_gw_change)
+
+        # Populate GW Selector (Next 5 Weeks)
+        self.planning_gws = [self.current_next_gw + i for i in range(6)]
+        self.gw_combo["values"] = [f"GW {gw}" for gw in self.planning_gws]
+        self.gw_combo.current(0)
+
+        # Buttons
         ttk.Button(
             self.input_frame, text="Simulate Transfer", command=self.on_transfer_click
         ).pack(side=tk.RIGHT, padx=20)
@@ -1016,6 +1055,7 @@ class DataFrame(OptimizerBaseFrame):
             "Def/90",
             "Pts/90 (L5)",
             "Pts/90/£m",
+            "xP (GW)",
             "Total XP (5GW)",
             "Next 5 Fixtures",
         )
@@ -1031,6 +1071,7 @@ class DataFrame(OptimizerBaseFrame):
             "Def/90": 60,
             "Pts/90 (L5)": 80,
             "Pts/90/£m": 80,
+            "xP (GW)": 80,
             "Total XP (5GW)": 80,
             "Next 5 Fixtures": 300,
         }
@@ -1044,6 +1085,7 @@ class DataFrame(OptimizerBaseFrame):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
 
+        # Initial Load
         self.check_initial_state()
 
         # Tags for Captaincy
@@ -1052,63 +1094,6 @@ class DataFrame(OptimizerBaseFrame):
 
         # Bind Double Click for Breakdown
         self.tree.bind("<Double-1>", self.show_xp_breakdown)
-
-    def update_view(self, data):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        all_players = []
-        for p in data["starters"]:
-            p["status"] = "Start"
-            all_players.append(p)
-        for p in data["bench"]:
-            p["status"] = "Bench"
-            all_players.append(p)
-
-        all_players.sort(
-            key=lambda x: (0 if x["status"] == "Start" else 1, x["position"])
-        )
-
-        cap_id = data["captain"]["id"] if data["captain"] else -1
-        vice_id = data["vice_captain"]["id"] if data["vice_captain"] else -1
-
-        for p in all_players:
-            fixtures_str = " | ".join(
-                [
-                    f"{f['opponent']} ({round(f['xp'], 1)})"
-                    for f in p.get("upcoming_fixtures", [])
-                ]
-            )
-
-            display_name = p["web_name"]
-            row_tag = ""
-
-            if p["id"] == cap_id:
-                display_name += " (C)"
-                row_tag = "captain"
-            elif p["id"] == vice_id:
-                display_name += " (V)"
-                row_tag = "vice"
-
-            self.tree.insert(
-                "",
-                tk.END,
-                iid=str(p["id"]),
-                values=(
-                    p["status"],
-                    display_name,
-                    self.get_pos_name(p["position"]),
-                    f"£{p['now_cost']}m",
-                    f"{round(p.get('mins_percent_l5', 0), 1)}%",
-                    f"{p.get('selected_by_percent', 0)}%",
-                    round(p.get("def_per_90", 0), 2),
-                    round(p.get("pts_per_90_l5", 0), 2),
-                    round(p.get("pts_per_90_per_m_l5", 0), 2),
-                    round(p.get("total_xp", 0), 2),
-                    fixtures_str,
-                ),
-                tags=(row_tag,),
-            )
 
     def show_xp_breakdown(self, event):
         selected = self.tree.selection()
@@ -1217,7 +1202,6 @@ class DataFrame(OptimizerBaseFrame):
                 row=2, column=1, sticky="w", padx=10
             )
 
-            # Row 3: Points Contribution
             tk.Label(
                 gw_frame,
                 text="Points Contribution:",
@@ -1276,6 +1260,52 @@ class DataFrame(OptimizerBaseFrame):
         ).pack(side=tk.LEFT, padx=(5, 0))
         return f
 
+    def on_gw_change(self, event=None):
+        """Handle change of planning gameweek."""
+        gw_str = self.gw_var.get()
+        if not gw_str:
+            return
+
+        gw_id = int(gw_str.replace("GW ", ""))
+        self.refresh_view_for_gw(gw_id)
+
+    def refresh_view_for_gw(self, gw_id):
+        """Calculates squad for the specific GW based on plan and runs optimization."""
+        squad_ids, bank = self.compute_squad_for_gw(gw_id)
+
+        # Update Bank Display locally (will be overwritten by optimization complete but good for instant feedback)
+        self.state["bank"] = bank
+        # Update current_squad_ids to match view (so PlayerSearch works correctly)
+        self.state["current_squad_ids"] = squad_ids
+
+        # Run optimization for this view
+        self.controller.run_optimization_for_gw(squad_ids, gw_id)
+
+    def compute_squad_for_gw(self, target_gw):
+        """Derives the squad list for a target GW based on the transfer plan."""
+        # Start with initial squad
+        squad_ids = list(self.state.get("initial_squad_ids", []))
+        if not squad_ids:  # Fallback
+            squad_ids = list(self.state.get("current_squad_ids", []))
+
+        bank = self.state.get("initial_bank", 0.0)
+
+        plan = self.state.get("transfer_plan", {})
+        sorted_events = sorted(plan.keys())
+
+        for gw in sorted_events:
+            if gw > target_gw:
+                break
+
+            transfers = plan[gw]
+            for out_id, in_id, price_change in transfers:
+                if out_id in squad_ids:
+                    squad_ids.remove(out_id)
+                    squad_ids.append(in_id)
+                    bank += price_change
+
+        return squad_ids, round(bank, 1)
+
     def on_transfer_click(self):
         selected = self.tree.selection()
         if not selected:
@@ -1306,64 +1336,117 @@ class DataFrame(OptimizerBaseFrame):
         )
 
     def undo_transfer(self):
-        history = self.state.get("history", [])
-        if not history:
-            messagebox.showinfo("Undo", "No transfers to undo.")
-            return
+        """Undoes the last transfer for the currently selected Gameweek."""
+        gw_str = self.gw_var.get()
+        gw_id = int(gw_str.replace("GW ", ""))
 
-        last_state = history.pop()
-        self.state["current_squad_ids"] = last_state["ids"]
-        self.state["bank"] = last_state["bank"]
+        plan = self.state.get("transfer_plan", {})
+        if gw_id in plan and plan[gw_id]:
+            # Remove last transfer
+            plan[gw_id].pop()
+            if not plan[gw_id]:
+                del plan[gw_id]  # Clean up empty keys
 
-        self.controller.run_global_optimization_with_ids(last_state["ids"])
+            # Refresh
+            self.refresh_view_for_gw(gw_id)
+        else:
+            messagebox.showinfo("Undo", f"No planned transfers for GW {gw_id}.")
 
     def perform_transfer(self, player_out_id, player_in_id):
-        current_ids = self.state["current_squad_ids"]
+        gw_str = self.gw_var.get()
+        gw_id = int(gw_str.replace("GW ", ""))
 
-        # Save state for Undo
-        self.state["history"].append(
-            {"ids": list(current_ids), "bank": self.state.get("bank", 0.0)}
-        )
+        # Calculate price change
+        try:
+            # Get Player Out Price
+            p_out = self.state["current_squad_data"].get(player_out_id)
+            price_out = p_out["now_cost"] if p_out else 0.0
 
-        if player_out_id in current_ids:
-            new_ids = [pid for pid in current_ids if pid != player_out_id]
-            new_ids.append(player_in_id)
+            # Get Player In Price
+            data = self.manager.get_bootstrap_static()
+            p_in = next((p for p in data["elements"] if p["id"] == player_in_id), None)
+            price_in = (p_in["now_cost"] / 10.0) if p_in else 0.0
 
-            # Update Bank
-            # We need prices. We have player_out_id price in current_squad_data.
-            # We need player_in_id price. We can fetch it or pass it.
-            # Ideally pass it, but for now let's fetch/find it.
-            # Actually, perform_transfer is called from PlayerSearchDialog which knows the price.
-            # But changing signature might break things.
-            # Let's just fetch it quickly or look it up if possible.
-            # Manager has get_player_summary but that's heavy.
-            # Let's use manager.get_bootstrap_static if cached or just fetch element summary.
-            # Better: PlayerSearchDialog passed the ID.
-            # Let's just fetch the single player data to get price.
-            try:
-                # Get Player Out Price
-                p_out = self.state["current_squad_data"].get(player_out_id)
-                price_out = p_out["now_cost"] if p_out else 0.0
-                # Or just fetch bootstrap-static again (it's cached).
-                data = self.manager.get_bootstrap_static()
-                p_in = next(
-                    (p for p in data["elements"] if p["id"] == player_in_id), None
-                )
-                price_in = (p_in["now_cost"] / 10.0) if p_in else 0.0
+            price_change = price_out - price_in
 
-                current_bank = self.state.get("bank", 0.0)
-                new_bank = current_bank + (price_out - price_in)
-                self.state["bank"] = round(new_bank, 1)
+            # Add to Plan
+            if "transfer_plan" not in self.state:
+                self.state["transfer_plan"] = {}
 
-            except Exception as e:
-                print(f"Error updating bank: {e}")
+            if gw_id not in self.state["transfer_plan"]:
+                self.state["transfer_plan"][gw_id] = []
 
-            self.controller.run_global_optimization_with_ids(new_ids)
-        else:
-            messagebox.showerror("Error", "Player not found in current squad.")
+            self.state["transfer_plan"][gw_id].append(
+                (player_out_id, player_in_id, price_change)
+            )
+
+            # Refresh View
+            self.refresh_view_for_gw(gw_id)
+
+        except Exception as e:
+            print(f"Error executing transfer: {e}")
+            messagebox.showerror("Error", f"Failed to execute transfer: {e}")
 
     def get_pos_name(self, pos_id):
         return {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}.get(pos_id, "?")
+
+    def update_view(self, data):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        all_players = []
+        for p in data["starters"]:
+            p["status"] = "Start"
+            all_players.append(p)
+        for p in data["bench"]:
+            p["status"] = "Bench"
+            all_players.append(p)
+
+        all_players.sort(
+            key=lambda x: (0 if x["status"] == "Start" else 1, x["position"])
+        )
+
+        cap_id = data["captain"]["id"] if data["captain"] else -1
+        vice_id = data["vice_captain"]["id"] if data["vice_captain"] else -1
+
+        for p in all_players:
+            fixtures_str = " | ".join(
+                [
+                    f"{f['opponent']} ({round(f['xp'], 1)})"
+                    for f in p.get("upcoming_fixtures", [])
+                ]
+            )
+
+            display_name = p["web_name"]
+            row_tag = ""
+
+            if p["id"] == cap_id:
+                display_name += " (C)"
+                row_tag = "captain"
+            elif p["id"] == vice_id:
+                display_name += " (V)"
+                row_tag = "vice"
+
+            self.tree.insert(
+                "",
+                tk.END,
+                iid=str(p["id"]),
+                values=(
+                    p["status"],
+                    display_name,
+                    self.get_pos_name(p["position"]),
+                    f"£{p['now_cost']}m",
+                    f"{round(p.get('mins_percent_l5', 0), 1)}%",
+                    f"{p.get('selected_by_percent', 0)}%",
+                    round(p.get("def_per_90", 0), 2),
+                    round(p.get("pts_per_90_l5", 0), 2),
+                    round(p.get("pts_per_90_per_m_l5", 0), 2),
+                    round(p.get("xp", 0), 2),
+                    round(p.get("total_xp", 0), 2),
+                    fixtures_str,
+                ),
+                tags=(row_tag,),
+            )
 
 
 class FDRFrame(BaseViewFrame):
